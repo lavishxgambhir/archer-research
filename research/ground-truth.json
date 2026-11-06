@@ -1,0 +1,680 @@
+{
+  "auth_actix": {
+    "scope": "Six application endpoints; generated documentation services excluded from denominator and must remain diagnostic",
+    "source": "src/handler/auth.rs:20-31; src/handler/users.rs:13-28; src/main.rs:142-146; src/auth.rs:99-158",
+    "routes": [
+      [
+        "POST",
+        "/api/auth/register",
+        "register",
+        "Unprotected"
+      ],
+      [
+        "POST",
+        "/api/auth/login",
+        "login",
+        "Unprotected"
+      ],
+      [
+        "POST",
+        "/api/auth/logout",
+        "logout",
+        "Protected"
+      ],
+      [
+        "GET",
+        "/api/users",
+        "get_users",
+        "Protected"
+      ],
+      [
+        "GET",
+        "/api/users/me",
+        "get_me",
+        "Protected"
+      ],
+      [
+        "GET",
+        "/api/healthchecker",
+        "heath_checker_handler",
+        "Unprotected"
+      ]
+    ],
+    "requirements": {
+      "GET /api/users": {
+        "authentication": true,
+        "roles": [
+          "Admin"
+        ]
+      },
+      "GET /api/users/me": {
+        "authentication": true,
+        "roles": [
+          "User",
+          "Moderator",
+          "Admin"
+        ]
+      },
+      "POST /api/auth/logout": {
+        "authentication": true,
+        "roles": [
+          "User",
+          "Moderator",
+          "Admin"
+        ]
+      }
+    },
+    "legitimate_differences": [
+      "User listing is Admin-only; self profile permits all three roles",
+      "Login and registration are intentionally public; logout requires identity"
+    ],
+    "peer_groups": [],
+    "expected_findings": 0
+  },
+  "seaorm": {
+    "source": "src/api/mod.rs:10-25; src/api/users.rs:18-31; src/api/auth.rs:47-50; src/middleware/role_guard_middleware.rs:78-96",
+    "routes": [
+      [
+        "GET",
+        "/health",
+        "health_check",
+        "Unprotected"
+      ],
+      [
+        "POST",
+        "/api/auth/login",
+        "login",
+        "Unprotected"
+      ],
+      [
+        "POST",
+        "/api/auth/logout",
+        "logout",
+        "Unprotected"
+      ],
+      [
+        "POST",
+        "/api/register",
+        "create_user",
+        "Unprotected"
+      ],
+      [
+        "GET",
+        "/api/users",
+        "get_users",
+        "Protected"
+      ],
+      [
+        "GET",
+        "/api/users/{id}",
+        "get_user",
+        "Protected"
+      ],
+      [
+        "PUT",
+        "/api/users/{id}",
+        "update_user",
+        "Protected"
+      ],
+      [
+        "DELETE",
+        "/api/users/{id}",
+        "delete_user_physical",
+        "Protected"
+      ],
+      [
+        "PATCH",
+        "/api/users/{id}/soft-delete",
+        "delete_user_logical",
+        "Protected"
+      ],
+      [
+        "PATCH",
+        "/api/users/{id}/restore",
+        "restore_user",
+        "Protected"
+      ]
+    ],
+    "requirements": {
+      "/api/users/*": {
+        "authentication": true,
+        "roles": [
+          "Admin"
+        ]
+      }
+    },
+    "legitimate_differences": [
+      "Registration is public and must not inherit user-service Admin restrictions",
+      "Logout validates claims for revocation but does not require an administrative role"
+    ],
+    "peer_groups": [
+      [
+        [
+          "GET",
+          "/api/users/{id}"
+        ],
+        [
+          "PUT",
+          "/api/users/{id}"
+        ],
+        [
+          "DELETE",
+          "/api/users/{id}"
+        ]
+      ],
+      [
+        [
+          "PATCH",
+          "/api/users/{id}/soft-delete"
+        ],
+        [
+          "PATCH",
+          "/api/users/{id}/restore"
+        ]
+      ]
+    ],
+    "expected_findings": 0
+  },
+  "demo": {
+    "source": "demo/src/main.rs:13-16, 88-114",
+    "scope": "Extraction fixture, not a validated security application: security helpers are empty or constant and middleware types are stubs. Security accuracy deliberately unscored.",
+    "routes": [
+      [
+        "GET",
+        "/api/v1/admin/users",
+        "admin_get_users",
+        null
+      ],
+      [
+        "GET",
+        "/api/v1/admin/reports",
+        "admin_get_reports",
+        null
+      ],
+      [
+        "GET",
+        "/api/v1/admin/audit_logs",
+        "admin_get_audit_logs",
+        null
+      ],
+      [
+        "GET",
+        "/api/v1/admin/analytics",
+        "admin_get_analytics",
+        null
+      ],
+      [
+        "GET",
+        "/api/v1/admin/status",
+        "admin_get_status",
+        null
+      ],
+      [
+        "GET",
+        "/api/v1/documents/{id}",
+        "get_document_by_id",
+        null
+      ],
+      [
+        "DELETE",
+        "/api/v1/documents/{id}",
+        "delete_document_by_id",
+        null
+      ],
+      [
+        "PUT",
+        "/api/v1/documents/{id}",
+        "update_document_by_id",
+        null
+      ],
+      [
+        "GET",
+        "/api/v1/settings/security",
+        "get_security_settings",
+        null
+      ],
+      [
+        "GET",
+        "/api/v1/settings/backup",
+        "get_backup_settings",
+        null
+      ]
+    ],
+    "peer_groups": [],
+    "expected_findings": null
+  },
+  "_validation": {
+    "criteria": "Route labels are method/path/handler triples read from production registration source. Candidate positives share a primary database resource or a directly related session operation. Relatedness never implies identical policy. All other pairs in each complete annotated route inventory are negative. Drift labels only assert no identified peer-policy violation in these audited examples; they are not whole-program security certification.",
+    "datasets": [
+      {
+        "name": "rest",
+        "path": "validation-rest",
+        "revision": "d4cdc238c88c09ea748ef5f42243d96b682caf31",
+        "sources": [
+          "src/routes.rs",
+          "src/handlers/user.rs",
+          "src/handlers/auth.rs",
+          "src/models/user.rs",
+          "src/middleware/auth.rs"
+        ],
+        "routes": [
+          [
+            "GET",
+            "/health",
+            "get_health"
+          ],
+          [
+            "POST",
+            "/api/v1/auth/login",
+            "login"
+          ],
+          [
+            "GET",
+            "/api/v1/auth/logout",
+            "logout"
+          ],
+          [
+            "GET",
+            "/api/v1/user/{id}",
+            "get_user"
+          ],
+          [
+            "PUT",
+            "/api/v1/user/{id}",
+            "update_user"
+          ],
+          [
+            "DELETE",
+            "/api/v1/user/{id}",
+            "delete_user"
+          ],
+          [
+            "GET",
+            "/api/v1/user",
+            "get_users"
+          ],
+          [
+            "POST",
+            "/api/v1/user",
+            "create_user"
+          ]
+        ],
+        "candidate_pairs": [
+          [
+            [
+              "POST",
+              "/api/v1/auth/login",
+              "login"
+            ],
+            [
+              "GET",
+              "/api/v1/user/{id}",
+              "get_user"
+            ]
+          ],
+          [
+            [
+              "POST",
+              "/api/v1/auth/login",
+              "login"
+            ],
+            [
+              "PUT",
+              "/api/v1/user/{id}",
+              "update_user"
+            ]
+          ],
+          [
+            [
+              "POST",
+              "/api/v1/auth/login",
+              "login"
+            ],
+            [
+              "DELETE",
+              "/api/v1/user/{id}",
+              "delete_user"
+            ]
+          ],
+          [
+            [
+              "POST",
+              "/api/v1/auth/login",
+              "login"
+            ],
+            [
+              "GET",
+              "/api/v1/user",
+              "get_users"
+            ]
+          ],
+          [
+            [
+              "POST",
+              "/api/v1/auth/login",
+              "login"
+            ],
+            [
+              "POST",
+              "/api/v1/user",
+              "create_user"
+            ]
+          ],
+          [
+            [
+              "GET",
+              "/api/v1/user/{id}",
+              "get_user"
+            ],
+            [
+              "PUT",
+              "/api/v1/user/{id}",
+              "update_user"
+            ]
+          ],
+          [
+            [
+              "GET",
+              "/api/v1/user/{id}",
+              "get_user"
+            ],
+            [
+              "DELETE",
+              "/api/v1/user/{id}",
+              "delete_user"
+            ]
+          ],
+          [
+            [
+              "GET",
+              "/api/v1/user/{id}",
+              "get_user"
+            ],
+            [
+              "GET",
+              "/api/v1/user",
+              "get_users"
+            ]
+          ],
+          [
+            [
+              "GET",
+              "/api/v1/user/{id}",
+              "get_user"
+            ],
+            [
+              "POST",
+              "/api/v1/user",
+              "create_user"
+            ]
+          ],
+          [
+            [
+              "PUT",
+              "/api/v1/user/{id}",
+              "update_user"
+            ],
+            [
+              "DELETE",
+              "/api/v1/user/{id}",
+              "delete_user"
+            ]
+          ],
+          [
+            [
+              "PUT",
+              "/api/v1/user/{id}",
+              "update_user"
+            ],
+            [
+              "GET",
+              "/api/v1/user",
+              "get_users"
+            ]
+          ],
+          [
+            [
+              "PUT",
+              "/api/v1/user/{id}",
+              "update_user"
+            ],
+            [
+              "POST",
+              "/api/v1/user",
+              "create_user"
+            ]
+          ],
+          [
+            [
+              "DELETE",
+              "/api/v1/user/{id}",
+              "delete_user"
+            ],
+            [
+              "GET",
+              "/api/v1/user",
+              "get_users"
+            ]
+          ],
+          [
+            [
+              "DELETE",
+              "/api/v1/user/{id}",
+              "delete_user"
+            ],
+            [
+              "POST",
+              "/api/v1/user",
+              "create_user"
+            ]
+          ],
+          [
+            [
+              "GET",
+              "/api/v1/user",
+              "get_users"
+            ],
+            [
+              "POST",
+              "/api/v1/user",
+              "create_user"
+            ]
+          ],
+          [
+            [
+              "POST",
+              "/api/v1/auth/login",
+              "login"
+            ],
+            [
+              "GET",
+              "/api/v1/auth/logout",
+              "logout"
+            ]
+          ]
+        ],
+        "drift_targets": []
+      },
+      {
+        "name": "diesel",
+        "path": "validation-examples/databases/diesel",
+        "revision": "4d2df245c67b5219b78e489cd27d60cdcc72e637",
+        "sources": [
+          "src/main.rs",
+          "src/actions.rs"
+        ],
+        "routes": [
+          [
+            "GET",
+            "/user/{user_id}",
+            "get_user"
+          ],
+          [
+            "POST",
+            "/user",
+            "add_user"
+          ]
+        ],
+        "candidate_pairs": [
+          [
+            [
+              "GET",
+              "/user/{user_id}",
+              "get_user"
+            ],
+            [
+              "POST",
+              "/user",
+              "add_user"
+            ]
+          ]
+        ],
+        "drift_targets": []
+      },
+      {
+        "name": "postgres",
+        "path": "validation-examples/databases/postgres",
+        "revision": "4d2df245c67b5219b78e489cd27d60cdcc72e637",
+        "sources": [
+          "src/main.rs",
+          "src/db.rs"
+        ],
+        "routes": [
+          [
+            "GET",
+            "/users",
+            "get_users"
+          ],
+          [
+            "POST",
+            "/users",
+            "add_user"
+          ]
+        ],
+        "candidate_pairs": [
+          [
+            [
+              "GET",
+              "/users",
+              "get_users"
+            ],
+            [
+              "POST",
+              "/users",
+              "add_user"
+            ]
+          ]
+        ],
+        "drift_targets": []
+      },
+      {
+        "name": "mysql",
+        "path": "validation-examples/databases/mysql",
+        "revision": "4d2df245c67b5219b78e489cd27d60cdcc72e637",
+        "sources": [
+          "src/main.rs",
+          "src/routes.rs",
+          "src/persistence.rs"
+        ],
+        "routes": [
+          [
+            "GET",
+            "/",
+            "index"
+          ],
+          [
+            "POST",
+            "/bank",
+            "add_bank"
+          ],
+          [
+            "GET",
+            "/bank",
+            "get_bank"
+          ],
+          [
+            "POST",
+            "/branch",
+            "add_branch"
+          ],
+          [
+            "GET",
+            "/branch",
+            "get_branch"
+          ],
+          [
+            "POST",
+            "/teller",
+            "add_teller"
+          ],
+          [
+            "GET",
+            "/teller",
+            "get_teller"
+          ],
+          [
+            "POST",
+            "/customer",
+            "add_customer"
+          ],
+          [
+            "GET",
+            "/customer",
+            "get_customer"
+          ]
+        ],
+        "candidate_pairs": [
+          [
+            [
+              "POST",
+              "/bank",
+              "add_bank"
+            ],
+            [
+              "GET",
+              "/bank",
+              "get_bank"
+            ]
+          ],
+          [
+            [
+              "POST",
+              "/branch",
+              "add_branch"
+            ],
+            [
+              "GET",
+              "/branch",
+              "get_branch"
+            ]
+          ],
+          [
+            [
+              "POST",
+              "/teller",
+              "add_teller"
+            ],
+            [
+              "GET",
+              "/teller",
+              "get_teller"
+            ]
+          ],
+          [
+            [
+              "POST",
+              "/customer",
+              "add_customer"
+            ],
+            [
+              "GET",
+              "/customer",
+              "get_customer"
+            ]
+          ]
+        ],
+        "drift_targets": []
+      }
+    ]
+  }
+}
