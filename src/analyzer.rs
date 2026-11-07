@@ -219,7 +219,19 @@ impl Route {
     }
 
     pub fn security_status(&self) -> RouteSecurityStatus {
-        if self.is_authorized() {
+        if matches!(self.handler_resolution, Some(HandlerResolution::Definition))
+            && self
+                .application
+                .as_ref()
+                .is_none_or(|app| app.starts_with("declaration:"))
+        {
+            // An attribute declares a service, not its effective App/scope.
+            // Keep body evidence, but do not certify security at an unknown mount.
+            RouteSecurityStatus::Unknown {
+                reason: "Attribute service has no verified application/middleware mount context"
+                    .into(),
+            }
+        } else if self.is_authorized() {
             RouteSecurityStatus::Protected
         } else if matches!(
             self.handler_resolution,
@@ -429,6 +441,7 @@ pub struct Report {
 /// loop, match arm, or `if let`/`while let`.
 #[derive(Default)]
 struct BlockScope {
+    app_builders: HashMap<String, Expr>,
     nonsecurity_middleware: HashSet<String>,
     /// Value bindings in scope at the current point of the walk. A `let`
     /// binding is added only after its statement, so earlier statements and its
@@ -444,6 +457,7 @@ struct BlockScope {
 impl BlockScope {
     fn with_locals(locals: HashSet<String>) -> Self {
         Self {
+            app_builders: HashMap::new(),
             nonsecurity_middleware: HashSet::new(),
             locals,
             items: HashMap::new(),
@@ -557,9 +571,17 @@ impl<'a> RouteVisitor<'a> {
         let local_prefix = scope_prefix(&node.receiver);
         let prefix = join_paths(&self.scope_context, &local_prefix);
         let path = join_paths(&prefix, &path);
-        let target = find_handler(&node.args);
+        let context = (self.crate_key.clone(), self.module.clone());
+        let target = find_handler(&node.args, self.index, &context);
         let (handler_evidence, handler_resolution) = match &target {
-            None => (Vec::new(), None),
+            None => {
+                self.diagnostic(
+                    "unsupported_registration",
+                    node.span().start().line,
+                    "Route has no supported handler target; security enforcement is unknown",
+                );
+                (Vec::new(), None)
+            }
             Some(target) => match self.block_local_handler(target) {
                 Some(Some(evidence)) => (evidence.to_vec(), Some(HandlerResolution::Local)),
                 Some(None) => (Vec::new(), Some(HandlerResolution::Unresolved)),
@@ -577,6 +599,19 @@ impl<'a> RouteVisitor<'a> {
         let handler = target.as_ref().and_then(HandlerTarget::name);
         let mut authorization =
             classify_authorization(node, handler.as_deref(), &handler_evidence, &self.file);
+        if target.is_none() {
+            // Preserve the existing null handler-resolution JSON representation.
+            // Missing registration evidence is uncertainty, never a public policy.
+            authorization.push(AuthEvidence {
+                kind: AuthEvidenceKind::Unknown,
+                mechanism: "UnsupportedRegistration".into(),
+                symbol: None,
+                file: self.file.clone(),
+                line: node.span().start().line,
+                handler: None,
+                strength: AuthStrength::Weak,
+            });
+        }
         if self.conservative_security {
             // A route builder argument is visited after add_route, so capture
             // its opaque middleware here without borrowing sibling arguments.
@@ -606,7 +641,15 @@ impl<'a> RouteVisitor<'a> {
 
         self.routes.push(Route {
             application: self.application.clone(),
-            method: extract_http_method(node),
+            method: node
+                .args
+                .last()
+                .and_then(|builder| {
+                    registration::resolved_route_builder(self.index, &context, builder)
+                })
+                .as_ref()
+                .and_then(route_builder_method)
+                .unwrap_or_else(|| extract_http_method(node)),
             path,
             scope_prefix: prefix,
             handler,
@@ -727,6 +770,16 @@ impl<'ast> Visit<'ast> for RouteVisitor<'_> {
                     .expect("block scope pushed above");
                 pattern_bindings(&local.pat, &mut scope.locals);
                 if let Pat::Ident(binding) = &local.pat {
+                    scope.app_builders.remove(&binding.ident.to_string());
+                    if binding.mutability.is_none() {
+                        if let Some(init) = &local.init {
+                            if registration::is_app_builder(&init.expr) {
+                                scope
+                                    .app_builders
+                                    .insert(binding.ident.to_string(), (*init.expr).clone());
+                            }
+                        }
+                    }
                     scope
                         .nonsecurity_middleware
                         .remove(&binding.ident.to_string());
@@ -747,6 +800,35 @@ impl<'ast> Visit<'ast> for RouteVisitor<'_> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        // Expand only immutable, lexically scoped App values. Mutable/conditional
+        // builders and arbitrary value aliases remain unsupported.
+        let mut binding_root = &*node.receiver;
+        while let Expr::MethodCall(call) = binding_root {
+            binding_root = &call.receiver;
+        }
+        if let Expr::Path(path) = binding_root {
+            if let Some(name) = path.path.get_ident() {
+                let value = self
+                    .block_scopes
+                    .iter()
+                    .rev()
+                    .find(|s| s.locals.contains(&name.to_string()))
+                    .and_then(|s| s.app_builders.get(&name.to_string()))
+                    .cloned();
+                if let Some(value) = value {
+                    let mut expanded = node.clone();
+                    fn replace_root(receiver: &mut Expr, value: Expr) {
+                        match receiver {
+                            Expr::MethodCall(call) => replace_root(&mut call.receiver, value),
+                            _ => *receiver = value,
+                        }
+                    }
+                    replace_root(&mut expanded.receiver, value);
+                    self.visit_expr_method_call(&expanded);
+                    return;
+                }
+            }
+        }
         let previous_application = self.application.clone();
         let mut app_root = &*node.receiver;
         while let Expr::MethodCall(call) = app_root {
@@ -1302,12 +1384,273 @@ struct HandlerIndex {
     pending_impls: Vec<(PathBuf, ModuleKey, syn::ItemImpl)>,
     traits: HashMap<ModuleKey, (PathBuf, syn::ItemTrait)>,
     type_aliases: HashMap<ModuleKey, syn::ItemType>,
+    conditional_result_kinds: HashSet<ModuleKey>,
     methods: Vec<usize>,
     record_attributes: HashMap<ModuleKey, Vec<syn::Attribute>>,
     record_fields: HashMap<ModuleKey, HashMap<String, (syn::Type, bool)>>,
+    schema_macros: Vec<(ModuleKey, syn::ItemMacro)>,
+    macro_uses: Vec<(ModuleKey, String)>,
+    diesel_tables: HashSet<ModuleKey>,
 }
 
 impl HandlerIndex {
+    fn attach_conditional_result_aliases(&mut self) {
+        // Model only standard cfg_select's configuration-invariant Result aliases.
+        // No feature is selected and no arbitrary macro body is expanded.
+        struct Branches(Vec<Vec<Item>>);
+        impl syn::parse::Parse for Branches {
+            fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+                let mut branches = Vec::new();
+                while !input.is_empty() {
+                    while !input.peek(syn::Token![=>]) {
+                        let _: proc_macro2::TokenTree = input.parse()?;
+                    }
+                    let _: syn::Token![=>] = input.parse()?;
+                    let body;
+                    syn::braced!(body in input);
+                    let mut items = Vec::new();
+                    while !body.is_empty() {
+                        items.push(body.parse()?);
+                    }
+                    branches.push(items);
+                    if input.peek(syn::Token![,]) {
+                        let _: syn::Token![,] = input.parse()?;
+                    }
+                }
+                Ok(Self(branches))
+            }
+        }
+        fn shadows(tree: &UseTree, name: &str) -> bool {
+            match tree {
+                UseTree::Path(p) => shadows(&p.tree, name),
+                UseTree::Name(n) => n.ident == name,
+                UseTree::Rename(r) => r.rename == name,
+                UseTree::Group(g) => g.items.iter().any(|u| shadows(u, name)),
+                UseTree::Glob(_) => true,
+            }
+        }
+        let mut additions = Vec::new();
+        for (context, item) in &self.schema_macros {
+            if !matches!(
+                security::external_path(self, context, &item.mac.path, 0).as_deref(),
+                Some("cfg_select" | "std::cfg_select")
+            ) {
+                continue;
+            }
+            if self.macro_uses.iter().any(|(c, _)| c.0 == context.0)
+                || self.schema_macros.iter().any(|(c, m)| {
+                    c.0 == context.0
+                        && m.mac.path.is_ident("macro_rules")
+                        && m.ident.as_ref().is_some_and(|n| n == "cfg_select")
+                })
+            {
+                continue;
+            }
+            let Ok(Branches(branches)) = syn::parse2(item.mac.tokens.clone()) else {
+                continue;
+            };
+            let mut aliases: HashMap<String, Vec<&syn::ItemType>> = HashMap::new();
+            for branch in &branches {
+                for item in branch {
+                    if let Item::Type(alias) = item {
+                        aliases
+                            .entry(alias.ident.to_string())
+                            .or_default()
+                            .push(alias);
+                    }
+                }
+            }
+            for (name, definitions) in aliases {
+                let first = definitions[0];
+                if !definitions.iter().all(|d| {
+                    d.ty.to_token_stream().to_string() == first.ty.to_token_stream().to_string()
+                        && d.generics.to_token_stream().to_string()
+                            == first.generics.to_token_stream().to_string()
+                }) {
+                    continue;
+                }
+                if branches.iter().any(|b| {
+                    b.iter()
+                        .filter(|i| matches!(i,Item::Type(t) if t.ident==name))
+                        .count()
+                        > 1
+                }) {
+                    continue;
+                }
+                let syn::Type::Path(p) = &*first.ty else {
+                    continue;
+                };
+                let Some(root) = p.path.segments.first() else {
+                    continue;
+                };
+                if first.generics.type_params().any(|p| p.ident == root.ident) {
+                    continue;
+                }
+                if !matches!(
+                    security::external_path(self, context, &p.path, 0).as_deref(),
+                    Some("Result" | "std::result::Result" | "core::result::Result")
+                ) {
+                    continue;
+                }
+                if branches.iter().flatten().any(|i| match i {
+                    Item::Use(u) => shadows(&u.tree, &root.ident.to_string()),
+                    Item::Type(t) => t.ident == root.ident,
+                    Item::Struct(t) => t.ident == root.ident,
+                    Item::Enum(t) => t.ident == root.ident,
+                    Item::Mod(t) => t.ident == root.ident,
+                    Item::Trait(t) => t.ident == root.ident,
+                    Item::Union(t) => t.ident == root.ident,
+                    Item::ExternCrate(t) => {
+                        t.rename.as_ref().map(|(_, n)| n).unwrap_or(&t.ident) == &root.ident
+                    }
+                    Item::Macro(_) => true,
+                    _ => false,
+                }) {
+                    continue;
+                }
+                let mut path = context.1.clone();
+                path.push(name);
+                let key = (context.0.clone(), path);
+                if !self.modules.contains(&key) {
+                    additions.push((key, first.clone()));
+                }
+            }
+        }
+        let mut counts = HashMap::new();
+        for (k, _) in &additions {
+            *counts.entry(k.clone()).or_insert(0usize) += 1;
+        }
+        for (key, alias) in additions {
+            if counts[&key] != 1 {
+                continue;
+            }
+            self.modules.insert(key.clone());
+            if matches!(alias.vis, syn::Visibility::Public(_)) {
+                self.public_modules.insert(key.clone());
+            }
+            // This proves Result's control-flow kind, not a complete expanded
+            // payload/record definition. Do not turn it into resource identity.
+            self.conditional_result_kinds.insert(key);
+        }
+    }
+
+    fn attach_diesel_tables(&mut self) {
+        // Parse only the public table!/dsl declaration contract. This is not a
+        // macro expander and does not manufacture model-to-table associations.
+        struct Declaration {
+            name: String,
+        }
+        impl syn::parse::Parse for Declaration {
+            fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+                while input.peek(syn::Token![use]) {
+                    let _: syn::ItemUse = input.parse()?;
+                }
+                let _ = input.call(syn::Attribute::parse_outer)?;
+                let visibility: syn::Visibility = input.parse()?;
+                if matches!(visibility, syn::Visibility::Restricted(_)) {
+                    return Err(input.error("restricted schema visibility is not modeled"));
+                }
+                let mut name: syn::Ident = input.parse()?;
+                if input.peek(syn::Token![.]) {
+                    let _: syn::Token![.] = input.parse()?;
+                    name = input.parse()?;
+                }
+                let keys = if input.peek(syn::token::Paren) {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    content
+                        .parse_terminated(|p| p.parse::<syn::Ident>(), syn::Token![,])?
+                        .into_iter()
+                        .map(|i| i.to_string())
+                        .collect::<Vec<_>>()
+                } else {
+                    vec!["id".into()]
+                };
+                let content;
+                syn::braced!(content in input);
+                let mut columns = HashSet::new();
+                while !content.is_empty() {
+                    let _ = content.call(syn::Attribute::parse_outer)?;
+                    let column: syn::Ident = content.parse()?;
+                    let _: syn::Token![->] = content.parse()?;
+                    let _: syn::Type = content.parse()?;
+                    if !columns.insert(column.to_string()) {
+                        return Err(content.error("duplicate column"));
+                    }
+                    if !content.is_empty() {
+                        let _: syn::Token![,] = content.parse()?;
+                    }
+                }
+                if keys.is_empty() || !keys.iter().all(|k| columns.contains(k)) {
+                    return Err(input.error("unresolved primary key"));
+                }
+                Ok(Self {
+                    name: name.to_string(),
+                })
+            }
+        }
+        let mut declarations: HashMap<ModuleKey, usize> = HashMap::new();
+        for (context, item) in &self.schema_macros {
+            let qualified = security::external_path(self, context, &item.mac.path, 0).as_deref()
+                == Some("diesel::table");
+            let visible: Vec<_> = self
+                .macro_uses
+                .iter()
+                .filter(|(key, _)| key.0 == context.0 && context.1.starts_with(&key.1))
+                .collect();
+            let bare = item.mac.path.is_ident("table")
+                && visible.len() == 1
+                && visible[0].1 == "diesel"
+                && !self
+                    .dependencies
+                    .contains_key(&(context.0.clone(), "diesel".into()))
+                && !self.schema_macros.iter().any(|(key, m)| {
+                    key.0 == context.0
+                        && m.mac.path.is_ident("macro_rules")
+                        && m.ident.as_ref().is_some_and(|n| n == "table")
+                })
+                && self
+                    .scope(&context.0, &context.1)
+                    .is_none_or(|s| s.globs.is_empty() && !s.imports.contains_key("table"));
+            if !qualified && !bare {
+                continue;
+            }
+            let Ok(declaration) = syn::parse2::<Declaration>(item.mac.tokens.clone()) else {
+                continue;
+            };
+            let mut path = context.1.clone();
+            path.push(declaration.name);
+            *declarations.entry((context.0.clone(), path)).or_default() += 1;
+        }
+        for (table, count) in declarations {
+            if count != 1 || self.modules.contains(&table) {
+                continue;
+            }
+            let mut dsl = table.1.clone();
+            dsl.push("dsl".into());
+            let dsl = (table.0.clone(), dsl);
+            self.modules.insert(table.clone());
+            self.modules.insert(dsl.clone());
+            self.public_modules.insert(table.clone());
+            self.public_modules.insert(dsl.clone());
+            let path = UsePath {
+                segments: std::iter::once("crate".into())
+                    .chain(table.1.iter().cloned())
+                    .collect(),
+                leading_colon: false,
+            };
+            for (key, name) in [
+                (table.clone(), "table".to_owned()),
+                (dsl, table.1.last().unwrap().clone()),
+            ] {
+                let scope = self.scopes.entry(key).or_default();
+                scope.public_imports.insert(name.clone());
+                scope.imports.entry(name).or_default().push(path.clone());
+            }
+            self.diesel_tables.insert(table);
+        }
+    }
+
     fn route_handler(&self, route: &Route) -> Option<&HandlerDefinition> {
         if matches!(
             route.handler_resolution,
@@ -1708,6 +2051,17 @@ impl HandlerIndex {
                         file.to_path_buf(),
                         (crate_key.to_path_buf(), module.clone()),
                         item_impl.clone(),
+                    ));
+                }
+                Item::Macro(item) => self
+                    .schema_macros
+                    .push(((crate_key.to_path_buf(), module.clone()), item.clone())),
+                Item::ExternCrate(item)
+                    if item.attrs.iter().any(|a| a.path().is_ident("macro_use")) =>
+                {
+                    self.macro_uses.push((
+                        (crate_key.to_path_buf(), module.clone()),
+                        item.ident.to_string(),
                     ));
                 }
                 Item::Type(item) => {
@@ -2722,7 +3076,7 @@ fn is_scope_call(expr: &Expr) -> bool {
     )
 }
 
-/// The argument of a route's `.to(...)` call.
+/// The argument of a route's `.to(...)` or legacy `.to_async(...)` call.
 #[derive(Debug, Clone)]
 enum HandlerTarget {
     Path {
@@ -2758,27 +3112,42 @@ impl HandlerTarget {
 
 fn find_handler(
     exprs: &syn::punctuated::Punctuated<Expr, syn::token::Comma>,
+    index: &HandlerIndex,
+    context: &ModuleKey,
 ) -> Option<HandlerTarget> {
-    exprs.iter().find_map(find_handler_in_expr)
+    exprs
+        .iter()
+        .find_map(|expr| find_handler_in_expr(expr, index, context))
 }
 
-fn find_handler_in_expr(expr: &Expr) -> Option<HandlerTarget> {
+fn find_handler_in_expr(
+    expr: &Expr,
+    index: &HandlerIndex,
+    context: &ModuleKey,
+) -> Option<HandlerTarget> {
     match expr {
-        Expr::MethodCall(method) if method.method == "to" => Some(match method.args.first()? {
-            Expr::Path(path) if path.qself.is_none() => HandlerTarget::Path {
-                segments: path
-                    .path
-                    .segments
-                    .iter()
-                    .map(|segment| segment.ident.to_string())
-                    .collect(),
-                leading_colon: path.path.leading_colon.is_some(),
-            },
-            _ => HandlerTarget::Other,
-        }),
-        Expr::MethodCall(method) => {
-            find_handler(&method.args).or_else(|| find_handler_in_expr(&method.receiver))
+        Expr::MethodCall(method)
+            if method.method == "to_async"
+                && registration::resolved_route_builder(index, context, &method.receiver)
+                    .is_none() =>
+        {
+            Some(HandlerTarget::Other)
         }
+        Expr::MethodCall(method) if method.method == "to" || method.method == "to_async" => {
+            Some(match method.args.first()? {
+                Expr::Path(path) if path.qself.is_none() => HandlerTarget::Path {
+                    segments: path
+                        .path
+                        .segments
+                        .iter()
+                        .map(|segment| segment.ident.to_string())
+                        .collect(),
+                    leading_colon: path.path.leading_colon.is_some(),
+                },
+                _ => HandlerTarget::Other,
+            })
+        }
+        Expr::MethodCall(method) => find_handler_in_expr(&method.receiver, index, context),
         _ => None,
     }
 }
@@ -2861,6 +3230,8 @@ pub fn analyze_repository(root: &Path) -> Result<Report> {
             message,
         });
     }
+    index.attach_conditional_result_aliases();
+    index.attach_diesel_tables();
     let mut mounted_routes = Vec::new();
     for (_, file_path, syntax) in &parsed_files {
         let mut visitor = RouteVisitor::new(file_path.clone(), &index);
@@ -2939,7 +3310,10 @@ pub fn analyze_repository(root: &Path) -> Result<Report> {
         });
     }
 
-    let protected_routes = routes.iter().filter(|r| r.is_authorized()).count();
+    let protected_routes = routes
+        .iter()
+        .filter(|r| matches!(r.security_status(), RouteSecurityStatus::Protected))
+        .count();
     let unknown_routes = routes
         .iter()
         .filter(|r| matches!(r.security_status(), RouteSecurityStatus::Unknown { .. }))

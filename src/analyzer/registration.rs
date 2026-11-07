@@ -1,6 +1,13 @@
 //! Actix registration expansion. Mount context is separate from handler identity.
 use super::*;
 
+pub(super) fn is_app_builder(mut expr: &Expr) -> bool {
+    while let Expr::MethodCall(call) = expr {
+        expr = &call.receiver;
+    }
+    matches!(expr, Expr::Call(c) if matches!(&*c.func, Expr::Path(p) if p.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().ends_with(&["App".into(), "new".into()])))
+}
+
 // Strip explicit test-only items before indexing and route traversal.
 pub(super) fn strip_test_items(items: &mut Vec<Item>) {
     items.retain(|item| {
@@ -33,6 +40,43 @@ pub struct Diagnostic {
     pub message: String,
 }
 
+// Normalize only the builder's root API path, never paths inside handler/guard
+// arguments. Local lookalikes and unresolved imports cannot prove this contract.
+pub(super) fn resolved_route_builder(
+    index: &HandlerIndex,
+    context: &ModuleKey,
+    expr: &Expr,
+) -> Option<Expr> {
+    let mut builder = expr.clone();
+    let mut root = &mut builder;
+    loop {
+        match root {
+            Expr::MethodCall(c) => root = &mut c.receiver,
+            Expr::Paren(p) => root = &mut p.expr,
+            Expr::Group(p) => root = &mut p.expr,
+            Expr::Call(c) => {
+                let Expr::Path(p) = &mut *c.func else {
+                    return None;
+                };
+                let canonical = security::external_path(index, context, &p.path, 0)?;
+                let supported = canonical
+                    .strip_prefix("actix_web::web::")
+                    .is_some_and(|name| {
+                        ROUTE_METHOD_CONSTRUCTORS.contains(&name)
+                            || ["route", "method"].contains(&name)
+                    })
+                    || canonical == "actix_web::Route::new";
+                if !supported {
+                    return None;
+                }
+                p.path = syn::parse_str(&canonical).ok()?;
+                return Some(builder);
+            }
+            _ => return None,
+        }
+    }
+}
+
 impl RouteVisitor<'_> {
     pub(super) fn diagnostic(&mut self, code: &str, line: usize, message: impl Into<String>) {
         self.diagnostics.push(Diagnostic {
@@ -47,10 +91,25 @@ impl RouteVisitor<'_> {
         let prefix = join_paths(&self.scope_context, &scope_prefix(&node.receiver));
         let Some(arg) = node.args.first() else { return };
         let target = match arg {
-            Expr::Closure(c) => match &*c.body {
-                Expr::Call(c) => Some(&*c.func),
-                _ => None,
-            },
+            Expr::Closure(c) => {
+                let body = match &*c.body {
+                    Expr::Block(b) if b.block.stmts.len() == 1 => match &b.block.stmts[0] {
+                        Stmt::Expr(e, _) => e,
+                        _ => &*c.body,
+                    },
+                    body => body,
+                };
+                match (c.inputs.first(), body) {
+                    (Some(Pat::Ident(param)), Expr::Call(call))
+                        if c.inputs.len() == 1
+                            && !call.args.is_empty()
+                            && matches!(call.args.first(),Some(Expr::Path(p)) if p.path.is_ident(&param.ident)) =>
+                    {
+                        Some(&*call.func)
+                    }
+                    _ => None,
+                }
+            }
             Expr::Path(_) => Some(arg),
             _ => None,
         };
@@ -267,12 +326,12 @@ pub(super) fn missing_context(
 ) -> Vec<Diagnostic> {
     routes.iter().filter(|route| {
         !mounted.iter().any(|m| m.file == route.file && m.line == route.line && m.handler == route.handler)
-        && index.definitions.iter().any(|d| d.file == route.file
+        && (matches!(route.handler_resolution,Some(HandlerResolution::Definition)) || index.definitions.iter().any(|d| d.file == route.file
             && d.function.sig.to_token_stream().to_string().contains("ServiceConfig")
-            && d.function.span().start().line <= route.line && d.function.span().end().line >= route.line)
+            && d.function.span().start().line <= route.line && d.function.span().end().line >= route.line))
     }).map(|route| Diagnostic {
         code: "missing_route_context".into(), file: route.file.clone(), line: route.line,
-        message: "Registration found in an unmounted configuration function; effective application mount is unknown".into(),
+        message: "Route declaration has no verified application mount; effective scope and middleware context may be incomplete".into(),
     }).collect()
 }
 
