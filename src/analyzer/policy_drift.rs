@@ -359,6 +359,22 @@ impl<'ast> Visit<'ast> for ResourceAccess {
     fn visit_item_fn(&mut self, _: &'ast ItemFn) {}
 }
 
+fn executed_callback(index: &HandlerIndex, caller: &HandlerDefinition, call: &ExprCall) -> bool {
+    let Expr::Path(p) = &*call.func else {
+        return false;
+    };
+    matches!(
+        security::external_path(
+            index,
+            &(caller.crate_key.clone(), caller.module.clone()),
+            &p.path,
+            0
+        )
+        .as_deref(),
+        Some("actix_web::web::block")
+    )
+}
+
 fn canonical_table(
     index: &HandlerIndex,
     context: &ModuleKey,
@@ -367,6 +383,9 @@ fn canonical_table(
 ) -> Option<String> {
     if depth >= 8 || path.is_empty() {
         return None;
+    }
+    if let Some(key) = declared_table(index, context, path, depth) {
+        return Some(format!("table:{}:{}", key.0.display(), key.1.join("::")));
     }
     if let Some(imports) = index
         .scope(&context.0, &context.1)
@@ -399,6 +418,120 @@ fn canonical_table(
         module.0.display(),
         module.1.join("::")
     ))
+}
+
+fn declared_table(
+    index: &HandlerIndex,
+    context: &ModuleKey,
+    path: &[String],
+    depth: usize,
+) -> Option<ModuleKey> {
+    if depth >= 8 || path.is_empty() {
+        return None;
+    }
+    let target = UsePath {
+        segments: path.to_vec(),
+        leading_colon: false,
+    };
+    if let Some(key) = index.resolve_module(&context.0, &context.1, &target, 0) {
+        return index.diesel_tables.contains(&key).then_some(key);
+    }
+    let scope = index.scope(&context.0, &context.1)?;
+    let mut local = context.1.clone();
+    local.push(path[0].clone());
+    if scope.imports.contains_key(&path[0]) || index.modules.contains(&(context.0.clone(), local)) {
+        return None;
+    }
+    let modules: Option<Vec<_>> = scope
+        .globs
+        .iter()
+        .map(|p| index.resolve_module(&context.0, &context.1, p, 0))
+        .collect();
+    let mut found = HashSet::new();
+    for module in modules? {
+        let mut child = module.1.clone();
+        child.push(path[0].clone());
+        let exported = index.public_modules.contains(&(module.0.clone(), child))
+            || index
+                .scope(&module.0, &module.1)
+                .is_some_and(|s| s.public_imports.contains(&path[0]));
+        if exported {
+            if let Some(table) = declared_table(index, &module, path, depth + 1) {
+                found.insert(table);
+            }
+        }
+    }
+    (found.len() == 1).then(|| found.into_iter().next().unwrap())
+}
+
+fn query_table(
+    index: &HandlerIndex,
+    caller: &HandlerDefinition,
+    expr: &Expr,
+    bindings: &HashMap<String, Option<Receiver>>,
+    depth: usize,
+) -> Option<ModuleKey> {
+    if depth >= 8 {
+        return None;
+    }
+    match expr {
+        Expr::Path(p) if p.qself.is_none() => {
+            let path: Vec<_> = p
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect();
+            if path.len() == 1 && bindings.contains_key(&path[0]) {
+                return None;
+            }
+            declared_table(
+                index,
+                &(caller.crate_key.clone(), caller.module.clone()),
+                &path,
+                0,
+            )
+        }
+        Expr::Paren(p) => query_table(index, caller, &p.expr, bindings, depth + 1),
+        Expr::Reference(p) => query_table(index, caller, &p.expr, bindings, depth + 1),
+        Expr::MethodCall(c)
+            if [
+                "filter",
+                "select",
+                "find",
+                "inner_join",
+                "left_join",
+                "order",
+                "order_by",
+                "limit",
+                "offset",
+                "distinct",
+                "into_boxed",
+                "count",
+                "for_update",
+            ]
+            .contains(&c.method.to_string().as_str()) =>
+        {
+            query_table(index, caller, &c.receiver, bindings, depth + 1)
+        }
+        Expr::Call(c) => {
+            let Expr::Path(p) = &*c.func else { return None };
+            if !matches!(
+                security::external_path(
+                    index,
+                    &(caller.crate_key.clone(), caller.module.clone()),
+                    &p.path,
+                    0
+                )
+                .as_deref(),
+                Some("diesel::insert_into" | "diesel::update" | "diesel::delete")
+            ) {
+                return None;
+            }
+            query_table(index, caller, c.args.first()?, bindings, depth + 1)
+        }
+        _ => None,
+    }
 }
 
 fn model_table(index: &HandlerIndex, owner: &ModuleKey) -> Option<String> {
@@ -474,7 +607,7 @@ fn substitute_type(ty: &mut syn::Type, replacements: &HashMap<String, syn::Type>
     }
 }
 
-fn record_type(
+pub(super) fn record_type(
     index: &HandlerIndex,
     handler: &HandlerDefinition,
     ty: &syn::Type,
@@ -509,6 +642,11 @@ fn record_type_depth(
                 leading_colon: path.path.leading_colon.is_some(),
             };
             if let Some(record) = index.resolve_module(&handler.crate_key, lexical, &target, 0) {
+                if index.conditional_result_kinds.contains(&record) {
+                    // Only the control-flow kind is known. Its successful
+                    // payload cannot be guessed from generic argument order.
+                    return None;
+                }
                 if index.record_types.contains(&record) {
                     return Some(record);
                 }
@@ -615,6 +753,237 @@ fn mentions_record(index: &HandlerIndex, handler: &HandlerDefinition, ty: &syn::
     }
 }
 
+// Constructor facts belong to a value, never to every instance of its type.
+// The ordered fields also make the bounded resource-cache context deterministic.
+#[derive(Clone, Debug)]
+struct Receiver {
+    owner: ModuleKey,
+    fields: std::collections::BTreeMap<String, Receiver>,
+    dispatch_trait: Option<ModuleKey>,
+}
+impl From<ModuleKey> for Receiver {
+    fn from(owner: ModuleKey) -> Self {
+        Self {
+            owner,
+            fields: Default::default(),
+            dispatch_trait: None,
+        }
+    }
+}
+
+fn forget_constructor(value: &mut Option<Receiver>) {
+    if value.as_ref().is_some_and(|v| v.dispatch_trait.is_some()) {
+        *value = None;
+    } else if let Some(value) = value {
+        value.fields.clear();
+    }
+}
+
+fn receiver_method<'a>(
+    index: &'a HandlerIndex,
+    caller: &HandlerDefinition,
+    value: &Receiver,
+    name: &str,
+) -> Option<&'a HandlerDefinition> {
+    if let Some(trait_key) = &value.dispatch_trait {
+        let mut candidates = index
+            .methods
+            .iter()
+            .map(|i| &index.definitions[*i])
+            .filter(|d| {
+                d.owner.as_ref() == Some(&value.owner)
+                    && d.implemented_trait.as_ref() == Some(trait_key)
+                    && d.name == name
+                    && d.function.sig.receiver().is_some()
+            });
+        let first = candidates.next()?;
+        return candidates.next().is_none().then_some(first);
+    }
+    index.resource_method(caller, &value.owner, name, true)
+}
+
+// A coercion must name one source-resolved trait. Never select an implementation
+// by the method/trait name, or because only one implementation happens to exist.
+fn trait_receiver(
+    index: &HandlerIndex,
+    caller: &HandlerDefinition,
+    ty: &syn::Type,
+    depth: usize,
+) -> Option<ModuleKey> {
+    if depth >= 8 {
+        return None;
+    }
+    match ty {
+        syn::Type::TraitObject(object) => {
+            let mut traits = Vec::new();
+            for bound in &object.bounds {
+                let syn::TypeParamBound::Trait(t) = bound else {
+                    continue;
+                };
+                let path = UsePath {
+                    segments: t
+                        .path
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect(),
+                    leading_colon: t.path.leading_colon.is_some(),
+                };
+                if let Some(key) = index
+                    .resolve_module(&caller.crate_key, &caller.module, &path, 0)
+                    .filter(|k| index.traits.contains_key(k))
+                {
+                    traits.push(key);
+                } else if !matches!(
+                    security::external_path(
+                        index,
+                        &(caller.crate_key.clone(), caller.module.clone()),
+                        &t.path,
+                        0
+                    )
+                    .as_deref(),
+                    Some("Send" | "Sync" | "std::marker::Send" | "std::marker::Sync")
+                ) {
+                    return None;
+                }
+            }
+            (traits.len() == 1).then(|| traits[0].clone())
+        }
+        syn::Type::Path(p) => {
+            if matches!(
+                security::external_path(
+                    index,
+                    &(caller.crate_key.clone(), caller.module.clone()),
+                    &p.path,
+                    0
+                )
+                .as_deref(),
+                Some(
+                    "Box"
+                        | "std::boxed::Box"
+                        | "alloc::boxed::Box"
+                        | "std::sync::Arc"
+                        | "alloc::sync::Arc"
+                        | "std::rc::Rc"
+                        | "alloc::rc::Rc"
+                        | "actix_web::web::Data"
+                        | "actix_web::data::Data"
+                )
+            ) {
+                let syn::PathArguments::AngleBracketed(a) = &p.path.segments.last()?.arguments
+                else {
+                    return None;
+                };
+                if a.args.len() != 1 {
+                    return None;
+                }
+                let syn::GenericArgument::Type(inner) = a.args.first()? else {
+                    return None;
+                };
+                return trait_receiver(index, caller, inner, depth + 1);
+            }
+            let path = UsePath {
+                segments: p
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect(),
+                leading_colon: p.path.leading_colon.is_some(),
+            };
+            let key = index.resolve_module(&caller.crate_key, &caller.module, &path, 0)?;
+            let alias = index.type_aliases.get(&key)?;
+            if !alias.generics.params.is_empty() {
+                return None;
+            }
+            let context = HandlerDefinition {
+                crate_key: key.0,
+                module: key.1[..key.1.len() - 1].to_vec(),
+                owner: None,
+                ..caller.clone()
+            };
+            trait_receiver(index, &context, &alias.ty, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+fn coerce_receiver(
+    index: &HandlerIndex,
+    caller: &HandlerDefinition,
+    ty: &syn::Type,
+    value: Option<Receiver>,
+) -> Option<Receiver> {
+    if let Some(trait_key) = trait_receiver(index, caller, ty, 0) {
+        let mut value = value?;
+        if value
+            .dispatch_trait
+            .as_ref()
+            .is_some_and(|previous| previous != &trait_key)
+        {
+            return None;
+        }
+        if !index.definitions.iter().any(|d| {
+            d.owner.as_ref() == Some(&value.owner)
+                && d.implemented_trait.as_ref() == Some(&trait_key)
+        }) {
+            return None;
+        }
+        value.dispatch_trait = Some(trait_key);
+        return Some(value);
+    }
+    let owner = concrete_receiver(index, caller, ty, 0)?;
+    value
+        .filter(|v| v.owner == owner && v.dispatch_trait.is_none())
+        .or_else(|| Some(owner.into()))
+}
+
+// Interpret only immutable let bindings followed by one return expression.
+// Branches, side effects, mutation, opaque adapters and early exits abstain.
+fn constructor_result(
+    index: &HandlerIndex,
+    callee: &HandlerDefinition,
+    mut bindings: HashMap<String, Option<Receiver>>,
+    depth: usize,
+) -> Option<Receiver> {
+    if depth >= 8 {
+        return None;
+    }
+    let (last, prefix) = callee.function.block.stmts.split_last()?;
+    for stmt in prefix {
+        let Stmt::Local(local) = stmt else {
+            return None;
+        };
+        let (pat, ty) = match &local.pat {
+            Pat::Type(p) => (&*p.pat, Some(&*p.ty)),
+            p => (p, None),
+        };
+        let Pat::Ident(name) = pat else { return None };
+        if name.mutability.is_some() || name.by_ref.is_some() {
+            return None;
+        }
+        let init = local.init.as_ref()?;
+        if init.diverge.is_some() {
+            return None;
+        }
+        let mut value = expression_record(index, callee, &init.expr, &bindings, depth + 1);
+        if let Some(ty) = ty {
+            value = coerce_receiver(index, callee, ty, value);
+        }
+        bindings.insert(name.ident.to_string(), value);
+    }
+    let expr = match last {
+        Stmt::Expr(Expr::Return(r), _) => r.expr.as_deref()?,
+        Stmt::Expr(e, None) => e,
+        _ => return None,
+    };
+    let value = expression_record(index, callee, expr, &bindings, depth + 1);
+    match &callee.function.sig.output {
+        syn::ReturnType::Type(_, ty) => coerce_receiver(index, callee, ty, value),
+        _ => None,
+    }
+}
+
 // Receiver identity is concrete: unlike data-return eligibility, it never
 // unwraps Vec/Option/Result/Json into an element or payload type.
 fn concrete_receiver(
@@ -631,6 +1000,36 @@ fn concrete_receiver(
         syn::Type::Path(path) => {
             if path.path.is_ident("Self") {
                 return handler.owner.clone();
+            }
+            // Only canonical transparent pointer/state wrappers dereference to
+            // their declared inner receiver. Collections and trait objects do not.
+            let context = (handler.crate_key.clone(), handler.module.clone());
+            if matches!(
+                security::external_path(index, &context, &path.path, 0).as_deref(),
+                Some(
+                    "actix_web::web::Data"
+                        | "actix_web::data::Data"
+                        | "std::sync::Arc"
+                        | "alloc::sync::Arc"
+                        | "std::rc::Rc"
+                        | "alloc::rc::Rc"
+                        | "Box"
+                        | "std::boxed::Box"
+                        | "alloc::boxed::Box"
+                )
+            ) {
+                let syn::PathArguments::AngleBracketed(args) =
+                    &path.path.segments.last()?.arguments
+                else {
+                    return None;
+                };
+                if args.args.len() != 1 {
+                    return None;
+                }
+                let syn::GenericArgument::Type(inner) = args.args.first()? else {
+                    return None;
+                };
+                return concrete_receiver(index, handler, inner, depth + 1);
             }
             let target = UsePath {
                 segments: path
@@ -665,7 +1064,7 @@ fn called_definition<'a>(
     index: &'a HandlerIndex,
     handler: &HandlerDefinition,
     expr: &Expr,
-    bindings: &HashMap<String, Option<ModuleKey>>,
+    bindings: &HashMap<String, Option<Receiver>>,
     depth: usize,
 ) -> Option<&'a HandlerDefinition> {
     if depth >= 8 {
@@ -692,8 +1091,7 @@ fn called_definition<'a>(
         }
         Expr::MethodCall(call) => {
             let owner = expression_record(index, handler, &call.receiver, bindings, depth + 1)?;
-            index
-                .resource_method(handler, &owner, &call.method.to_string(), true)
+            receiver_method(index, handler, &owner, &call.method.to_string())
                 .filter(|d| d.function.sig.receiver().is_some())
         }
         _ => None,
@@ -704,45 +1102,116 @@ fn expression_record(
     index: &HandlerIndex,
     handler: &HandlerDefinition,
     expr: &Expr,
-    bindings: &HashMap<String, Option<ModuleKey>>,
+    bindings: &HashMap<String, Option<Receiver>>,
     depth: usize,
-) -> Option<ModuleKey> {
+) -> Option<Receiver> {
     if depth >= 8 {
         return None;
     }
     match expr {
-        Expr::Struct(record) => concrete_receiver(
-            index,
-            handler,
-            &syn::Type::Path(syn::TypePath {
-                attrs: Vec::new(),
-                qself: record.qself.clone(),
-                path: record.path.clone(),
-            }),
-            depth + 1,
-        ),
-        Expr::Path(path) => bindings.get(&path.path.get_ident()?.to_string())?.clone(),
+        Expr::Struct(record) => {
+            let owner = concrete_receiver(
+                index,
+                handler,
+                &syn::Type::Path(syn::TypePath {
+                    attrs: Vec::new(),
+                    qself: record.qself.clone(),
+                    path: record.path.clone(),
+                }),
+                depth + 1,
+            )?;
+            if record.rest.is_some() {
+                // Struct update still proves the concrete receiver type. Its
+                // inherited fields do not prove constructor-specific values.
+                return Some(owner.into());
+            }
+            let mut value = Receiver::from(owner.clone());
+            let context = HandlerDefinition {
+                crate_key: owner.0.clone(),
+                module: owner.1[..owner.1.len() - 1].to_vec(),
+                owner: Some(owner.clone()),
+                ..handler.clone()
+            };
+            for field in &record.fields {
+                let syn::Member::Named(name) = &field.member else {
+                    continue;
+                };
+                let Some((ty, _)) = index
+                    .record_fields
+                    .get(&owner)
+                    .and_then(|f| f.get(&name.to_string()))
+                else {
+                    continue;
+                };
+                if let Some(child) = coerce_receiver(
+                    index,
+                    &context,
+                    ty,
+                    expression_record(index, handler, &field.expr, bindings, depth + 1),
+                ) {
+                    value.fields.insert(name.to_string(), child);
+                }
+            }
+            Some(value)
+        }
+        Expr::Path(path) => {
+            if let Some(name) = path.path.get_ident() {
+                if let Some(value) = bindings.get(&name.to_string()) {
+                    return value.clone();
+                }
+            }
+            let owner = concrete_receiver(
+                index,
+                handler,
+                &syn::Type::Path(syn::TypePath {
+                    attrs: Vec::new(),
+                    qself: path.qself.clone(),
+                    path: path.path.clone(),
+                }),
+                depth + 1,
+            )?;
+            index
+                .record_fields
+                .get(&owner)?
+                .is_empty()
+                .then(|| owner.into())
+        }
         Expr::Reference(e) => expression_record(index, handler, &e.expr, bindings, depth + 1),
         Expr::Paren(e) => expression_record(index, handler, &e.expr, bindings, depth + 1),
+        Expr::Cast(e) => coerce_receiver(
+            index,
+            handler,
+            &e.ty,
+            expression_record(index, handler, &e.expr, bindings, depth + 1),
+        ),
         Expr::Field(field) => {
             let owner = expression_record(index, handler, &field.base, bindings, depth + 1)?;
             let syn::Member::Named(name) = &field.member else {
                 return None;
             };
-            let (ty, public) = index.record_fields.get(&owner)?.get(&name.to_string())?;
+            let (ty, public) = index
+                .record_fields
+                .get(&owner.owner)?
+                .get(&name.to_string())?;
             if !public
-                && !(handler.crate_key == owner.0
-                    && handler.module.starts_with(&owner.1[..owner.1.len() - 1]))
+                && !(handler.crate_key == owner.owner.0
+                    && handler
+                        .module
+                        .starts_with(&owner.owner.1[..owner.owner.1.len() - 1]))
             {
                 return None;
             }
             let context = HandlerDefinition {
-                module: owner.1[..owner.1.len() - 1].to_vec(),
-                crate_key: owner.0.clone(),
+                module: owner.owner.1[..owner.owner.1.len() - 1].to_vec(),
+                crate_key: owner.owner.0.clone(),
                 owner: None,
                 ..handler.clone()
             };
-            concrete_receiver(index, &context, ty, depth + 1)
+            owner
+                .fields
+                .get(&name.to_string())
+                .cloned()
+                .or_else(|| concrete_receiver(index, &context, ty, depth + 1).map(Receiver::from))
         }
         Expr::Try(e) => {
             let callee = called_definition(index, handler, &e.expr, bindings, depth + 1)?;
@@ -784,7 +1253,8 @@ fn expression_record(
             }
             if let syn::PathArguments::AngleBracketed(args) = &last.arguments {
                 if let Some(syn::GenericArgument::Type(payload)) = args.args.first() {
-                    return concrete_receiver(index, callee, payload, depth + 1);
+                    return concrete_receiver(index, callee, payload, depth + 1)
+                        .map(Receiver::from);
                 }
             }
             None
@@ -795,17 +1265,91 @@ fn expression_record(
                 return None;
             }
             match &callee.function.sig.output {
-                syn::ReturnType::Type(_, ty) => concrete_receiver(index, callee, ty, depth + 1),
+                syn::ReturnType::Type(_, ty) => {
+                    concrete_receiver(index, callee, ty, depth + 1).map(Receiver::from)
+                }
                 _ => None,
             }
         }
         Expr::Call(_) | Expr::MethodCall(_) => {
+            if let Expr::Call(call) = expr {
+                if let Expr::Path(path) = &*call.func {
+                    if matches!(
+                        security::external_path(
+                            index,
+                            &(handler.crate_key.clone(), handler.module.clone()),
+                            &path.path,
+                            0
+                        )
+                        .as_deref(),
+                        Some(
+                            "Box::new"
+                                | "std::boxed::Box::new"
+                                | "alloc::boxed::Box::new"
+                                | "std::sync::Arc::new"
+                                | "alloc::sync::Arc::new"
+                                | "std::rc::Rc::new"
+                                | "alloc::rc::Rc::new"
+                                | "actix_web::web::Data::new"
+                                | "actix_web::data::Data::new"
+                        )
+                    ) && call.args.len() == 1
+                    {
+                        return expression_record(
+                            index,
+                            handler,
+                            call.args.first()?,
+                            bindings,
+                            depth + 1,
+                        );
+                    }
+                }
+            }
             let callee = called_definition(index, handler, expr, bindings, depth + 1)?;
             if callee.function.sig.asyncness.is_some() {
                 return None;
             }
+            let mut arguments = HashMap::new();
+            let actual = match expr {
+                Expr::Call(c) => &c.args,
+                Expr::MethodCall(c) => &c.args,
+                _ => unreachable!(),
+            };
+            let formals: Vec<_> = callee
+                .function
+                .sig
+                .inputs
+                .iter()
+                .filter_map(|a| {
+                    if let FnArg::Typed(a) = a {
+                        Some(a)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if actual.len() == formals.len() {
+                for (formal, actual) in formals.iter().zip(actual) {
+                    if let Pat::Ident(p) = &*formal.pat {
+                        arguments.insert(
+                            p.ident.to_string(),
+                            coerce_receiver(
+                                index,
+                                callee,
+                                &formal.ty,
+                                expression_record(index, handler, actual, bindings, depth + 1),
+                            ),
+                        );
+                    }
+                }
+                if let Some(value) = constructor_result(index, callee, arguments, depth + 1) {
+                    return Some(value);
+                }
+            }
             match &callee.function.sig.output {
-                syn::ReturnType::Type(_, ty) => concrete_receiver(index, callee, ty, depth + 1),
+                syn::ReturnType::Type(_, ty) => {
+                    concrete_receiver(index, callee, ty, depth + 1).map(Receiver::from)
+                }
                 _ => None,
             }
         }
@@ -825,21 +1369,58 @@ fn resource_condition_bindings(expr: &Expr, names: &mut HashSet<String>) {
     }
 }
 
+fn receiver_root(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Path(p) => Some(p.path.get_ident()?.to_string()),
+        Expr::Field(f) => receiver_root(&f.base),
+        Expr::Paren(p) => receiver_root(&p.expr),
+        Expr::Unary(u) => receiver_root(&u.expr),
+        _ => None,
+    }
+}
+
 fn receiver_calls<'a>(
     index: &'a HandlerIndex,
     handler: &HandlerDefinition,
+    receiver: Option<&Receiver>,
     discarded: &HashSet<(usize, usize)>,
     abstentions: &mut std::collections::BTreeSet<String>,
-) -> Vec<(&'a HandlerDefinition, bool)> {
+    tables: &mut HashSet<String>,
+    evidence: &mut std::collections::BTreeSet<String>,
+) -> Vec<(&'a HandlerDefinition, bool, Receiver)> {
     struct TypedCalls<'a, 'b> {
         index: &'a HandlerIndex,
         handler: &'b HandlerDefinition,
-        bindings: HashMap<String, Option<ModuleKey>>,
-        calls: Vec<(&'a HandlerDefinition, bool)>,
+        bindings: HashMap<String, Option<Receiver>>,
+        calls: Vec<(&'a HandlerDefinition, bool, Receiver)>,
         discarded: &'b HashSet<(usize, usize)>,
         abstentions: &'b mut std::collections::BTreeSet<String>,
+        tables: &'b mut HashSet<String>,
+        evidence: &'b mut std::collections::BTreeSet<String>,
+        invalidated: HashSet<String>,
     }
     impl<'ast> Visit<'ast> for TypedCalls<'_, '_> {
+        fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+            self.visit_expr(&call.func);
+            for arg in &call.args {
+                if let Expr::Closure(closure) = arg {
+                    if executed_callback(self.index, self.handler, call) {
+                        let previous = self.bindings.clone();
+                        for input in &closure.inputs {
+                            let mut names = HashSet::new();
+                            pattern_bindings(input, &mut names);
+                            for name in names {
+                                self.bindings.insert(name, None);
+                            }
+                        }
+                        self.visit_expr(&closure.body);
+                        self.bindings = previous;
+                    }
+                } else {
+                    self.visit_expr(arg);
+                }
+            }
+        }
         fn visit_block(&mut self, block: &'ast Block) {
             let previous = self.bindings.clone();
             visit::visit_block(self, block);
@@ -850,24 +1431,26 @@ fn receiver_calls<'a>(
                 self.visit_expr(&init.expr);
             }
             let (pat, declared) = match &local.pat {
-                Pat::Type(p) => (
-                    &*p.pat,
-                    concrete_receiver(self.index, self.handler, &p.ty, 0),
-                ),
+                Pat::Type(p) => (&*p.pat, Some(&*p.ty)),
                 p => (p, None),
             };
-            let inferred = declared.or_else(|| {
-                local.init.as_ref().and_then(|i| {
-                    expression_record(self.index, self.handler, &i.expr, &self.bindings, 0)
-                })
+            let mut inferred = local.init.as_ref().and_then(|i| {
+                expression_record(self.index, self.handler, &i.expr, &self.bindings, 0)
             });
+            if let Some(ty) = declared {
+                inferred = coerce_receiver(self.index, self.handler, ty, inferred);
+            }
             let mut names = HashSet::new();
             pattern_bindings(pat, &mut names);
             for name in names {
+                let mut value = inferred.clone();
+                if self.invalidated.contains(&name) {
+                    forget_constructor(&mut value);
+                }
                 self.bindings.insert(
                     name,
                     if matches!(pat, Pat::Ident(_)) {
-                        inferred.clone()
+                        value
                     } else {
                         None
                     },
@@ -876,29 +1459,95 @@ fn receiver_calls<'a>(
         }
         fn visit_expr_assign(&mut self, expr: &'ast syn::ExprAssign) {
             self.visit_expr(&expr.right);
-            if let Expr::Path(p) = &*expr.left {
-                if let Some(name) = p.path.get_ident() {
-                    self.bindings.insert(name.to_string(), None);
+            if let Some(name) = receiver_root(&expr.left) {
+                if matches!(&*expr.left, Expr::Path(_)) {
+                    self.bindings.insert(name, None);
+                } else if let Some(value) = self.bindings.get_mut(&name) {
+                    forget_constructor(value);
                 }
             }
         }
         fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
+            for name in &self.invalidated {
+                if let Some(value) = self.bindings.get_mut(name) {
+                    forget_constructor(value);
+                }
+            }
+            if ["load", "first", "get_result", "get_results", "execute"]
+                .contains(&call.method.to_string().as_str())
+            {
+                if let Some(table) =
+                    query_table(self.index, self.handler, &call.receiver, &self.bindings, 0)
+                {
+                    self.tables.insert(format!(
+                        "table:{}:{}",
+                        table.0.display(),
+                        table.1.join("::")
+                    ));
+                    self.evidence.insert(format!(
+                        "{}:{} {} primary declared-table query receiver: {}",
+                        self.handler.file.display(),
+                        call.span().start().line,
+                        self.handler.rust_path(),
+                        table.1.join("::")
+                    ));
+                }
+            }
             if let Some(owner) =
                 expression_record(self.index, self.handler, &call.receiver, &self.bindings, 0)
             {
                 if classify_check_name(&call.method.to_string()).is_none() {
-                    if let Some(callee) = self
-                        .index
-                        .resource_method(self.handler, &owner, &call.method.to_string(), true)
-                        .filter(|d| d.function.sig.receiver().is_some())
+                    if let Some(callee) =
+                        receiver_method(self.index, self.handler, &owner, &call.method.to_string())
+                            .filter(|d| d.function.sig.receiver().is_some())
                     {
                         let p = call.span().start();
-                        self.calls
-                            .push((callee, self.discarded.contains(&(p.line, p.column))));
+                        if let Some(trait_key) = &owner.dispatch_trait {
+                            self.evidence.insert(format!(
+                                "{}:{} constructor-proven receiver {} implements {} -> {}:{} {}",
+                                self.handler.file.display(),
+                                p.line,
+                                owner.owner.1.join("::"),
+                                trait_key.1.join("::"),
+                                callee.file.display(),
+                                callee.function.sig.ident.span().start().line,
+                                callee.rust_path()
+                            ));
+                        }
+                        let mut value = owner.clone();
+                        if callee.function.sig.receiver().is_some_and(|r| {
+                            r.mutability.is_some()
+                                || matches!(
+                                    r.kind,
+                                    syn::ReceiverKind::Reference(_, _, Some(_))
+                                        | syn::ReceiverKind::Typed(..)
+                                )
+                        }) {
+                            value.fields.clear();
+                            if let Some(name) = receiver_root(&call.receiver) {
+                                self.invalidated.insert(name.clone());
+                                if let Some(value) = self.bindings.get_mut(&name) {
+                                    forget_constructor(value);
+                                }
+                            }
+                        }
+                        self.calls.push((
+                            callee,
+                            self.discarded.contains(&(p.line, p.column)),
+                            value,
+                        ));
                     } else {
+                        if !owner.fields.is_empty() {
+                            if let Some(name) = receiver_root(&call.receiver) {
+                                self.invalidated.insert(name.clone());
+                                if let Some(value) = self.bindings.get_mut(&name) {
+                                    forget_constructor(value);
+                                }
+                            }
+                        }
                         self.abstentions.insert(format!(
                             "No unique applicable implementation for {}::{} at {}:{}",
-                            owner.1.join("::"),
+                            owner.owner.1.join("::"),
                             call.method,
                             self.handler.file.display(),
                             call.span().start().line
@@ -964,18 +1613,7 @@ fn receiver_calls<'a>(
                 self.bindings = previous.clone();
             }
         }
-        fn visit_expr_closure(&mut self, closure: &'ast ExprClosure) {
-            let previous = self.bindings.clone();
-            for input in &closure.inputs {
-                let mut names = HashSet::new();
-                pattern_bindings(input, &mut names);
-                for name in names {
-                    self.bindings.insert(name, None);
-                }
-            }
-            self.visit_expr(&closure.body);
-            self.bindings = previous;
-        }
+        fn visit_expr_closure(&mut self, _: &'ast ExprClosure) {}
         fn visit_expr_for_loop(&mut self, expr: &'ast ExprForLoop) {
             self.visit_expr(&expr.expr);
             let previous = self.bindings.clone();
@@ -989,6 +1627,29 @@ fn receiver_calls<'a>(
         }
         fn visit_item_fn(&mut self, _: &'ast ItemFn) {}
     }
+    // Mutation in a branch/closure must not be undone by lexical environment
+    // restoration. Drop value-specific facts for that root throughout the body.
+    #[derive(Default)]
+    struct Mutated(HashSet<String>);
+    impl<'ast> Visit<'ast> for Mutated {
+        fn visit_expr_assign(&mut self, e: &'ast syn::ExprAssign) {
+            if let Some(n) = receiver_root(&e.left) {
+                self.0.insert(n);
+            }
+            visit::visit_expr_assign(self, e);
+        }
+        fn visit_expr_reference(&mut self, e: &'ast syn::ExprReference) {
+            if e.mutability.is_some() {
+                if let Some(n) = receiver_root(&e.expr) {
+                    self.0.insert(n);
+                }
+            }
+            visit::visit_expr_reference(self, e);
+        }
+        fn visit_item_fn(&mut self, _: &'ast ItemFn) {}
+    }
+    let mut mutated = Mutated::default();
+    mutated.visit_block(&handler.function.block);
     let mut visitor = TypedCalls {
         index,
         handler,
@@ -996,18 +1657,29 @@ fn receiver_calls<'a>(
         calls: Vec::new(),
         discarded,
         abstentions,
+        tables,
+        evidence,
+        invalidated: mutated.0,
     };
     if handler.function.sig.receiver().is_some() {
-        visitor
-            .bindings
-            .insert("self".into(), handler.owner.clone());
+        let value = receiver
+            .cloned()
+            .or_else(|| handler.owner.clone().map(Receiver::from))
+            .map(|mut value| {
+                value.dispatch_trait = None;
+                if visitor.invalidated.contains("self") {
+                    value.fields.clear();
+                }
+                value
+            });
+        visitor.bindings.insert("self".into(), value);
     }
     for input in &handler.function.sig.inputs {
         if let FnArg::Typed(arg) = input {
             if let Pat::Ident(name) = &*arg.pat {
                 visitor.bindings.insert(
                     name.ident.to_string(),
-                    concrete_receiver(index, handler, &arg.ty, 0),
+                    concrete_receiver(index, handler, &arg.ty, 0).map(Receiver::from),
                 );
             }
         }
@@ -1043,9 +1715,10 @@ fn resources(
     handler: &HandlerDefinition,
     trace: &mut ResourceTrace,
     depth: usize,
+    receiver: Option<&Receiver>,
 ) -> HashSet<String> {
     let key = format!(
-        "{}:{}:{}:{}:{:?}:{}",
+        "{}:{}:{}:{}:{:?}:{}:{:?}",
         handler
             .owner
             .as_ref()
@@ -1056,7 +1729,8 @@ fn resources(
         handler.function.sig.ident.span().start().line,
         handler.function.sig.ident.span().start().column,
         handler.implemented_trait,
-        handler.rust_path()
+        handler.rust_path(),
+        receiver
     );
     if depth >= 8 {
         trace.abstentions.insert(format!(
@@ -1164,7 +1838,7 @@ fn resources(
             if classify_check_name(&callee.name).is_some() {
                 continue;
             }
-            let child = resources(index, callee, trace, depth + 1);
+            let child = resources(index, callee, trace, depth + 1, None);
             let writes = child
                 .iter()
                 .any(|s| ["@write", "@create", "@update", "@delete"].contains(&s.as_str()));
@@ -1188,9 +1862,15 @@ fn resources(
             }
         }
     }
-    for (callee, discarded) in
-        receiver_calls(index, handler, &access.discarded, &mut trace.abstentions)
-    {
+    for (callee, discarded, value) in receiver_calls(
+        index,
+        handler,
+        receiver,
+        &access.discarded,
+        &mut trace.abstentions,
+        &mut access.resources,
+        &mut trace.calls,
+    ) {
         if auxiliary_unit_method(index, callee) {
             trace.abstentions.insert(format!(
                 "Unit-returning utility {}:{} has no verified model ownership",
@@ -1200,7 +1880,7 @@ fn resources(
             continue;
         }
 
-        let child = resources(index, callee, trace, depth + 1);
+        let child = resources(index, callee, trace, depth + 1, Some(&value));
         let writes = child
             .iter()
             .any(|s| ["@write", "@create", "@update", "@delete"].contains(&s.as_str()));
@@ -1270,7 +1950,7 @@ pub(super) fn discover(
             );
             HashSet::new()
         } else if let Some(handler) = index.route_handler(route) {
-            resources(index, handler, &mut trace, 0)
+            resources(index, handler, &mut trace, 0, None)
         } else {
             trace
                 .abstentions
@@ -1801,6 +2481,27 @@ pub(super) fn infer(
                     continue;
                 };
                 let actual = policy(target, dimension);
+                if actual.is_none()
+                    && expected.iter().any(|v| v.starts_with("source predicate "))
+                    && target.requirements.iter().any(|r| {
+                        matches!(r.dimension.as_str(), "roles" | "permissions" | "ownership")
+                            && r.dimension != dimension
+                            && r.enforcement == Enforcement::Observed
+                    })
+                {
+                    explanations.push(StageEvidence::drift(group,target,dimension,"A different authorization dimension is enforced; predicate-policy equivalence or intended substitution is unverified",vec![]));
+                    continue;
+                }
+                if actual.as_ref().is_some_and(|values| {
+                    values != expected
+                        && values
+                            .iter()
+                            .chain(expected.iter())
+                            .any(|v| v.starts_with("source predicate "))
+                }) {
+                    explanations.push(StageEvidence::drift(group,target,dimension,"Different source predicates have no verified implication; preserve legitimate policy differences",vec![]));
+                    continue;
+                }
                 let has_dimension = target.requirements.iter().any(|r| r.dimension == dimension);
                 if has_dimension && actual.is_none() {
                     explanations.push(StageEvidence::drift(

@@ -2,6 +2,578 @@ use super::tests::TempRepo;
 use super::*;
 
 #[test]
+fn constructor_dispatch_is_per_instance_and_never_unique_implementation_guessing() {
+    for name in [
+        "boxed",
+        "arc",
+        "state-data",
+        "helper",
+        "alias",
+        "two-instances",
+        "runtime",
+        "unbound",
+        "unique-unbound",
+        "same-handler",
+        "mutable-method",
+        "mutated",
+        "borrowed",
+        "opaque",
+        "inherent-conflict",
+    ] {
+        let wrapper = if name == "arc" {
+            "std::sync::Arc"
+        } else {
+            "Box"
+        };
+        let build = if name == "opaque" {
+            "opaque_repository()"
+        } else {
+            "Disk"
+        };
+        let make = format!("let repo={wrapper}::new({build}); let state=State::new(repo);");
+        let first = match name {
+            "runtime" => format!(
+                "let state=if choose() {{State::new({wrapper}::new(Disk))}} else {{State::new({wrapper}::new(Memory))}};"
+            ),
+            "unbound" | "unique-unbound" => String::new(),
+            "same-handler" => format!(
+                "{make} let another=State::new({wrapper}::new(Memory));let other=another.rows();response(other);"
+            ),
+            "mutable-method" => format!(
+                "{} if choose() {{state.reset();}}",
+                make.replace("let state=", "let mut state=")
+            ),
+            "mutated" => format!("{make} if choose() {{state.repo={wrapper}::new(Memory);}}"),
+            "borrowed" => format!("{make} opaque(&mut state);"),
+            "state-data" => format!("{make} let state=actix_web::web::Data::new(state);"),
+            "helper" => "let state=make_state();".into(),
+            _ => make.clone(),
+        };
+        let second = if name == "two-instances" {
+            format!("let state=State::new({wrapper}::new(Memory));")
+        } else {
+            first.clone()
+        };
+        let alias = if name == "alias" {
+            format!("type Repository={wrapper}<dyn Store>;")
+        } else {
+            String::new()
+        };
+        let ty = if name == "alias" {
+            "Repository".to_owned()
+        } else {
+            format!("{wrapper}<dyn Store>")
+        };
+        let param = if ["unbound", "unique-unbound"].contains(&name) {
+            "state:actix_web::web::Data<State>"
+        } else {
+            ""
+        };
+        let inherent = if name == "inherent-conflict" {
+            r#"impl Disk {fn load(&self)->Row {sqlx::query("SELECT * FROM wrong_table");Row}}"#
+        } else {
+            ""
+        };
+        let mut source = format!(
+            r#"
+trait Store {{fn load(&self)->Row;}}
+struct Row; struct Disk; struct Memory;
+impl Store for Disk {{fn load(&self)->Row {{sqlx::query("SELECT * FROM records");Row}}}}
+impl Store for Memory {{fn load(&self)->Row {{sqlx::query("SELECT * FROM cache");Row}}}}
+{inherent}
+{alias}
+struct State {{repo:{ty}}}
+impl State {{fn new(repo:{ty})->Self {{Self{{repo}}}} fn rows(&self)->Row {{self.repo.load()}} fn reset(&mut self){{self.repo={wrapper}::new(Memory);}}}}
+fn make_state()->State {{let repo={wrapper}::new(Disk);State::new(repo)}}
+async fn one({param}) {{{first} let rows=state.rows();response(rows);}}
+async fn two({param}) {{{second} let rows=state.rows();response(rows);}}
+fn app() {{App::new().route("/one",web::get().to(one)).route("/two",web::get().to(two));}}
+"#
+        );
+        if name == "unique-unbound" {
+            source=source.replace("impl Store for Memory {fn load(&self)->Row {sqlx::query(\"SELECT * FROM cache\");Row}}","").replace(&format!("fn reset(&mut self){{self.repo={wrapper}::new(Memory);}}"),"");
+        }
+        let report = TempRepo::new(name, &[("main.rs", &source)]).analyze();
+        let positive = [
+            "boxed",
+            "arc",
+            "state-data",
+            "helper",
+            "alias",
+            "inherent-conflict",
+            "same-handler",
+        ]
+        .contains(&name);
+        assert_eq!(
+            report.peer_groups.len(),
+            usize::from(positive),
+            "{name}: {:?}",
+            report.resource_evidence
+        );
+        let facts: Vec<_> = report
+            .resource_evidence
+            .iter()
+            .flat_map(|e| &e.resources)
+            .collect();
+        assert!(
+            !facts.iter().any(|x| x.contains("wrong_table")),
+            "{name}: {facts:?}"
+        );
+        if positive {
+            let target_line = source
+                .lines()
+                .position(|line| line.starts_with("impl Store for Disk"))
+                .unwrap()
+                + 1;
+            let target = format!("main.rs:{target_line} crate::Disk::load");
+            assert!(
+                report.resource_evidence.iter().all(|e| e
+                    .call_chain_evidence
+                    .iter()
+                    .any(|x| x.contains("constructor-proven receiver"))),
+                "{name}: {:?}",
+                report.resource_evidence
+            );
+            assert!(
+                report.resource_evidence.iter().all(|e| e
+                    .call_chain_evidence
+                    .iter()
+                    .any(|line| line.ends_with(&target))),
+                "{name}: {:?}",
+                report.resource_evidence
+            );
+        }
+        if name == "two-instances" {
+            assert!(
+                report
+                    .resource_evidence
+                    .iter()
+                    .any(|e| e.resources.iter().any(|x| x.contains("records")))
+            );
+            assert!(
+                report
+                    .resource_evidence
+                    .iter()
+                    .any(|e| e.resources.iter().any(|x| x.contains("cache")))
+            );
+        }
+        if name == "same-handler" {
+            assert!(
+                report.resource_evidence.iter().all(|e| e
+                    .resources
+                    .iter()
+                    .any(|r| r.contains("cache"))
+                    && e.resources.iter().any(|r| r.contains("records"))),
+                "{:?}",
+                report.resource_evidence
+            );
+        }
+        assert!(report.finding_details.is_empty());
+    }
+}
+
+#[test]
+fn constructor_trait_values_cross_crates_without_global_type_specialization() {
+    let app = r#"
+use backend::{State,Disk,Store};
+use std::sync::Arc as Shared;
+fn make()->State {let repo=Shared::new(Disk::new());State::new(repo)}
+fn erased()->Shared<dyn Store> {Shared::new(Disk::new())}
+async fn one(){let state=make();let state=actix_web::web::Data::new(state);let rows=state.rows();response(rows);}
+async fn two(){let state=make();let rows=state.rows();response(rows);}
+async fn three(){let repo=erased();let rows=repo.load();response(rows);}
+async fn unknown(state:actix_web::web::Data<State>){let rows=state.rows();response(rows);}
+fn app(){App::new().route("/one",web::get().to(one)).route("/two",web::get().to(two)).route("/three",web::get().to(three)).route("/unknown",web::get().to(unknown));}
+"#;
+    let store = r#"
+pub trait Store {fn load(&self)->Row;}
+pub struct Row;pub struct Disk; pub struct Alternative;
+impl Disk {pub fn new()->Self{Self} pub fn load(&self)->Row{sqlx::query("SELECT * FROM incorrect");Row}}
+impl Store for Disk {fn load(&self)->Row{sqlx::query("SELECT * FROM documents");Row}}
+impl Store for Alternative {fn load(&self)->Row{sqlx::query("SELECT * FROM other");Row}}
+pub struct State {repo:std::sync::Arc<dyn Store>}
+impl State {pub fn new(repo:std::sync::Arc<dyn Store>)->Self{Self{repo}} pub fn rows(&self)->Row{self.repo.load()}}
+"#;
+    let report=TempRepo::new("cross-crate-constructors",&[
+        ("Cargo.toml","[workspace]\nmembers=[\"app\",\"db\"]\nresolver=\"2\""),
+        ("app/Cargo.toml","[package]\nname=\"app\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[dependencies]\nbackend={package=\"storage\",path=\"../db\"}"),
+        ("db/Cargo.toml","[package]\nname=\"storage\"\nversion=\"0.1.0\"\nedition=\"2021\""),
+        ("app/src/lib.rs",app),("db/src/lib.rs",store),
+    ]).analyze();
+    assert_eq!(
+        report.peer_groups.len(),
+        1,
+        "{:?}",
+        report.resource_evidence
+    );
+    assert_eq!(report.peer_groups[0].routes.len(), 3);
+    for e in &report.resource_evidence {
+        if e.route.handler.as_deref() == Some("unknown") {
+            assert!(e.resources.is_empty(), "{e:?}");
+        } else {
+            assert!(e.resources.iter().any(|x| x.contains("documents")), "{e:?}");
+            assert!(
+                !e.resources
+                    .iter()
+                    .any(|x| x.contains("incorrect") || x.contains("other")),
+                "{e:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn struct_update_preserves_static_dispatch_without_specializing_dynamic_fields() {
+    let report=TempRepo::new("updated-receivers", &[("main.rs",r#"
+struct Row;struct Query {limit:usize}
+impl Query {fn rows(&self)->Row {sqlx::query("SELECT * FROM documents");Row}}
+trait Store{fn rows(&self)->Row;}struct State{repo:Box<dyn Store>}
+impl State{fn rows(&self)->Row{self.repo.rows()}}
+async fn one(){let rows=Query{limit:10,..defaults()}.rows();response(rows);}
+async fn two(){let mut query=Query{limit:20,..defaults()};query.limit=30;let rows=query.rows();response(rows);}
+async fn unknown(){let state=State{..runtime_state()};let rows=state.rows();response(rows);}
+fn app(){App::new().route("/one",web::get().to(one)).route("/two",web::get().to(two)).route("/unknown",web::get().to(unknown));}
+"#)]).analyze();
+    assert_eq!(report.peer_groups.len(), 1);
+    assert_eq!(report.peer_groups[0].routes.len(), 2);
+    assert!(
+        report
+            .resource_evidence
+            .iter()
+            .find(|e| e.route.handler.as_deref() == Some("unknown"))
+            .unwrap()
+            .resources
+            .is_empty()
+    );
+}
+
+#[test]
+fn canonical_state_wrappers_follow_concrete_fields_without_guessing_dispatch() {
+    for (name, ty, imports, target) in [
+        (
+            "data",
+            "StateData<State>",
+            "use actix_web::web::Data as StateData;",
+            true,
+        ),
+        (
+            "arc-data",
+            "StateData<std::sync::Arc<State>>",
+            "use actix_web::web::Data as StateData;",
+            true,
+        ),
+        (
+            "aliased",
+            "StateAlias",
+            "use actix_web::web::Data as StateData; type StateAlias=StateData<State>;",
+            true,
+        ),
+        (
+            "fake-data",
+            "StateData<State>",
+            "struct StateData<T> { value:T }",
+            false,
+        ),
+        ("collection", "Vec<State>", "", false),
+        (
+            "dynamic",
+            "StateData<dyn Store>",
+            "use actix_web::web::Data as StateData; trait Store {fn one(&self);fn two(&self);}",
+            false,
+        ),
+    ] {
+        let source = format!(
+            r#"
+{imports}
+mod schema {{pub mod documents {{}} pub mod unrelated {{}}}}
+pub struct Item;
+pub struct Repository;
+impl Repository {{
+ pub fn one(&self)->Item {{schema::documents::table.first(conn); Item}}
+ pub fn two(&self)->Vec<Item> {{schema::documents::table.load(conn); vec![]}}
+}}
+pub struct Services {{pub repository:std::sync::Arc<Repository>}}
+pub struct State {{pub services:Services}}
+async fn one(state:{ty}) {{let row=state.services.repository.one(); response(row);}}
+async fn two(state:{ty}) {{let rows=state.services.repository.two(); response(rows);}}
+async fn unrelated() {{schema::unrelated::table.load(conn);}}
+fn app(c:&mut Config) {{c.route("/single/{{id}}",web::get().to(one)).route("/catalog",web::get().to(two)).route("/other",web::get().to(unrelated));}}
+"#
+        );
+        let report = TempRepo::new(name, &[("main.rs", &source)]).analyze();
+        let calls: Vec<_> = report
+            .resource_evidence
+            .iter()
+            .flat_map(|r| &r.call_chain_evidence)
+            .collect();
+        assert_eq!(
+            calls.iter().any(|r| r.contains("Repository::one")),
+            target,
+            "{name}: {calls:?}"
+        );
+        assert_eq!(
+            calls.iter().any(|r| r.contains("Repository::two")),
+            target,
+            "{name}: {calls:?}"
+        );
+        assert_eq!(
+            report.peer_groups.len(),
+            usize::from(target),
+            "{name}: {:?}",
+            report.peer_groups
+        );
+        if target {
+            assert_eq!(report.peer_groups[0].routes.len(), 2);
+        }
+        assert!(report.finding_details.is_empty());
+    }
+}
+
+#[test]
+fn declared_table_aliases_require_unambiguous_executed_query_sources() {
+    for name in [
+        "qualified",
+        "bare",
+        "aliased-macro",
+        "callback",
+        "fake-macro",
+        "duplicate",
+        "shadowed-query",
+        "two-tables",
+        "unused-closure",
+        "opaque-callback",
+        "unknown-glob",
+        "shared-scalar-utility",
+    ] {
+        let setup = match name {
+            "bare" => "#[macro_use] extern crate diesel;",
+            "fake-macro" => {
+                "#[macro_use] extern crate diesel; macro_rules! table {($($t:tt)*)=>{}}"
+            }
+            _ => "",
+        };
+        let macro_name = match name {
+            "bare" | "fake-macro" => "table",
+            "aliased-macro" => "define",
+            _ => "diesel::table",
+        };
+        let schema_import = if name == "aliased-macro" {
+            "use diesel::table as define;"
+        } else {
+            ""
+        };
+        let duplicate = if name == "duplicate" {
+            "diesel::table! {records (id) {id->Integer,}}"
+        } else {
+            ""
+        };
+        let imports = if name == "callback" {
+            "use storage::{collection,other};"
+        } else if name == "unknown-glob" {
+            "use storage::*; use unavailable::*;"
+        } else {
+            "use storage::*;"
+        };
+        let query = match name {
+            "unused-closure" => "let deferred=||collection.load::<Row>(conn);",
+            "opaque-callback" => "store_for_later(||collection.load::<Row>(conn));",
+            "callback" => {
+                "let rows=actix_web::web::block(move||collection.load::<Row>(conn)).await; response(rows);"
+            }
+            _ => "let rows=collection.load::<Row>(conn); response(rows);",
+        };
+        let second = if ["two-tables", "shared-scalar-utility"].contains(&name) {
+            "let rows=other.load::<Row>(conn); response(rows);"
+        } else {
+            query
+        };
+        let param = if name == "shadowed-query" {
+            "collection:FakeSource"
+        } else {
+            ""
+        };
+        let cache = if name == "shared-scalar-utility" {
+            "let cfg=cache_metric(); use_metric(cfg);"
+        } else {
+            ""
+        };
+        let source = format!(
+            r#"
+{setup}
+mod mapping {{ {schema_import}
+ {macro_name}! {{records (id) {{id->Integer,}}}}
+ {macro_name}! {{elsewhere (id) {{id->Integer,}}}}
+ {duplicate}
+}}
+mod storage {{pub use crate::mapping::records::dsl::records as collection; pub use crate::mapping::elsewhere::dsl::elsewhere as other;}}
+{imports}
+struct Row {{id:i32}}
+struct FakeSource;
+fn cache_metric()->usize {{collection.load::<Row>(conn).len()}}
+async fn first({param}) {{{cache} {query}}}
+async fn second({param}) {{{cache} {second}}}
+fn app(c:&mut Config) {{c.route("/first",web::get().to(first)).route("/second",web::get().to(second));}}
+"#
+        );
+        let report = TempRepo::new(name, &[("main.rs", &source)]).analyze();
+        let expected = ["qualified", "bare", "aliased-macro", "callback"].contains(&name);
+        assert_eq!(
+            report.peer_groups.len(),
+            usize::from(expected),
+            "{name}: {:?}",
+            report.resource_evidence
+        );
+        if expected {
+            assert!(
+                report
+                    .resource_evidence
+                    .iter()
+                    .all(|e| e.resources.iter().any(|r| r.ends_with("mapping::records"))),
+                "{name}: {:?}",
+                report.resource_evidence
+            );
+        }
+        assert!(report.finding_details.is_empty());
+    }
+}
+
+#[test]
+fn layered_cross_crate_resources_support_conservative_drift_comparisons() {
+    for (name, last, scope, findings) in [
+        ("clean", "check_role(\"Admin\")?;", false, 0),
+        ("missing", "", false, 1),
+        ("weakened", "check_role(\"Reader\")?;", false, 1),
+        ("ignored", "check_role(\"Admin\");", false, 0),
+        ("legitimate", "check_role(\"Reader\")?;", true, 0),
+    ] {
+        let third = if scope {
+            ".service(web::scope(\"/self\").route(\"/three/{id}\",web::get().to(three)))"
+        } else {
+            ".route(\"/three/{id}\",web::get().to(three))"
+        };
+        let app = format!(
+            r#"
+use actix_web::{{App,web::Data as StateData}};
+use storage::Repository as Store;
+pub struct Services {{pub repository:std::sync::Arc<Store>}}
+pub struct State {{pub services:Services}}
+fn check_role(r:&str)->Result<(),Error> {{if allowed(r) {{Ok(())}} else {{Err(denied())}}}}
+async fn one(state:StateData<State>) {{check_role("Admin")?;let row=state.services.repository.load();response(row);}}
+async fn two(state:StateData<State>) {{check_role("Admin")?;let row=state.services.repository.load();response(row);}}
+async fn three(state:StateData<State>) {{{last}let row=state.services.repository.load();response(row);}}
+fn app() {{App::new().route("/one/{{id}}",web::get().to(one)).route("/two/{{id}}",web::get().to(two)){third};}}
+"#
+        );
+        let repo = TempRepo::new(
+            name,
+            &[
+                (
+                    "Cargo.toml",
+                    "[workspace]\nmembers=[\"app\",\"store\"]\nresolver=\"2\"",
+                ),
+                (
+                    "app/Cargo.toml",
+                    "[package]\nname=\"app\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[dependencies]\nstorage={package=\"records\",path=\"../store\"}",
+                ),
+                (
+                    "store/Cargo.toml",
+                    "[package]\nname=\"records\"\nversion=\"0.1.0\"\nedition=\"2021\"",
+                ),
+                ("app/src/lib.rs", &app),
+                (
+                    "store/src/lib.rs",
+                    "mod internal;pub use internal::Repository;",
+                ),
+                (
+                    "store/src/internal.rs",
+                    r#"pub struct Entry;pub struct Repository;impl Repository {pub fn load(&self)->Entry {sqlx::query("SELECT * FROM documents");Entry}}"#,
+                ),
+            ],
+        );
+        let report = repo.analyze();
+        assert_eq!(
+            report.peer_groups.len(),
+            1,
+            "{name}: {:?}",
+            report.resource_evidence
+        );
+        assert_eq!(
+            report.peer_groups[0].routes.len(),
+            if scope { 2 } else { 3 }
+        );
+        assert_eq!(
+            report.finding_details.len(),
+            findings,
+            "{name}: {:?}",
+            report.finding_details
+        );
+        assert!(!report.invariants.is_empty(), "{name}");
+        assert!(report.resource_evidence.iter().all(|e| {
+            e.call_chain_evidence
+                .iter()
+                .any(|c| c.contains("internal::Repository::load"))
+        }));
+        if findings == 1 {
+            assert_eq!(
+                report.finding_details[0]
+                    .suspicious_route
+                    .handler
+                    .as_deref(),
+                Some("three")
+            );
+        }
+    }
+}
+
+#[test]
+fn awaited_permissions_preserve_peer_membership_and_drift_safety() {
+    let mut peer_count = None;
+    for (last, expected_findings) in [
+        ("check_permission(\"edit\").await?;", 0),
+        ("check_permission(\"read\").await?;", 1),
+        ("", 1),
+        // An ignored check remains unresolved; do not manufacture a missing-policy finding.
+        ("check_permission(\"edit\").await;", 0),
+        ("check_permission(required).await?;", 0),
+    ] {
+        let source = format!(
+            r#"
+async fn check_permission(p: &str) -> Result<(), Error> {{ if !allowed(p) {{ return Err(denied()); }} Ok(()) }}
+async fn one() {{ check_permission("edit").await?; sqlx::query("SELECT * FROM records"); }}
+async fn two() {{ check_permission("edit").await?; sqlx::query("SELECT * FROM records"); }}
+async fn three() {{ {last} sqlx::query("SELECT * FROM records"); }}
+fn app(c: &mut Config) {{ c.service(web::scope("/records")
+ .route("/one/{{id}}", web::get().to(one))
+ .route("/two/{{id}}", web::get().to(two))
+ .route("/three/{{id}}", web::get().to(three))); }}
+"#
+        );
+        let report = TempRepo::new("async-permission-drift", &[("main.rs", &source)]).analyze();
+        assert_eq!(
+            *peer_count.get_or_insert(report.peer_groups.len()),
+            report.peer_groups.len()
+        );
+        assert_eq!(report.peer_groups.len(), 1);
+        assert_eq!(report.peer_groups[0].routes.len(), 3);
+        assert_eq!(
+            report.finding_details.len(),
+            expected_findings,
+            "{last}: {:?}",
+            report.finding_details
+        );
+        if expected_findings > 0 {
+            assert_eq!(
+                report.finding_details[0]
+                    .suspicious_route
+                    .handler
+                    .as_deref(),
+                Some("three")
+            );
+        }
+    }
+}
+
+#[test]
 fn conflicting_overlapping_contracts_abstain_instead_of_choosing_first() {
     let report = analyze_bodies(
         "conflicting-contracts",
