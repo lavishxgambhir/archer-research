@@ -1,5 +1,27 @@
 # ARCHER peer inference and evaluation
 
+## Release correctness and executable demo (2026-11-12)
+
+`--diff` now analyzes a committed Git-object snapshot and the current working tree with the same engine. Matching uses application correspondence, endpoints and normalized requirement values rather than changed-file membership. Reports separate new, unchanged, resolved and unverified findings. Parse/Git failures are explicit; Unknown base evidence and changed requirement identities do not establish verified introduction/resolution. Verified regression reasons are consolidated per route. Snapshots are disposable and do not check out or modify the caller's Git state.
+
+ARG handler identities use application, definition file and module-qualified symbol. DOT escapes every quoted identifier/label/endpoint. Unresolved and potential evidence have distinct graph relations; observed authentication is identified separately. Production taxonomy remains three emitted categories; compatibility variants are documented as inactive.
+
+The corrected Actix demo has 12 routes, four groups covering 11 routes, three invariants, nine compared routes and zero clean findings. Separate actual enforcement-removal mutations produce one finding each for role/permission, authentication and ownership. `python demo/reproduce.py --runtime` verifies analyzer output, genuine base/current diff output and HTTP acceptance/rejection in disposable copies, leaving demo source unchanged. Public and Member/Admin profile controls remain clean. Fixed public tokens make this a demonstration fixture, not production authentication or an unseen evaluation.
+
+All 138 Rust tests and six reporting tests pass, preserving the earlier 134 tests. Earlier fixtures retain 6 TP / zero FP / zero FN; the separate three-application actual-source benchmark retains 3 TP / zero FP / five FN. Lemmy, SeaORM and auth_actix summaries and labeled development handler/peer metrics are unchanged. Core inference/security/grouping files and historical evidence retain their prior hashes. No thresholds, security classifications, dependencies of the analyzer or detection rules were changed. Demo dependencies were already declared; its lockfile is now retained for reproducibility.
+
+Details and measurements: `target/release-correctness-20261112/REPORT.md`. The main README now documents actual CLI behavior, taxonomy, limitations, classifications and measured demo results. No project commits, pushes, branch switches or upstream changes were made.
+
+## Pending corrections reviewed (2026-11-12)
+
+Trait dispatch again requires a proven receiver value; one visible implementation never establishes runtime identity. Multi-method attributes retain each explicit method and mount context. Generic `route` attributes no longer default to GET; malformed or unsupported arguments produce diagnostics. Literal attribute wrappers/guards remain unresolved security evidence. Explicit foreign/conflicting bare attribute imports cannot create Actix routes. Arbitrary macro aliases and procedural expansion remain unsupported.
+
+Root-path peers require corroborating resolved resource evidence; root paths and shared auxiliary utilities alone do not establish membership. Unresolved-symbol diagnostics report names as context without claiming their spelling proves authentication, roles, permissions or ownership. Drift supporter thresholds and Unknown safeguards remain unchanged.
+
+Development results preserve Lemmy's 240 routes, 162 groups, six role invariants, 190 Unknown and zero compared routes; its labeled sample retains 62 TP / zero FP / four FN. Repo 2 and auth_actix retain their measured summaries and labeled handler/peer results. On consumed rustypaste data, discovery improves from six to eight labeled routes and five to seven correct local handler instances; peer pairs improve from zero TP / three FP / ten FN to three TP / zero FP / seven FN. The consumed Meilisearch 20-route macro challenge remains undiscovered. These are development/regression results, not fresh generalization evidence. No Lemmy authentication or drift-recall gain is claimed.
+
+Verification artifacts and final mutation results: `target/pending-corrections-20261112/`. Historical evaluation files remain unchanged. No new production modules or dependencies, commits or pushes were introduced by this correction pass.
+
 ## Latest verified pass: source predicates and fresh evaluation (2026-11-08)
 
 The pipeline remains Route Discovery -> Peer Groups -> separate authorization invariants -> Drift Detection. Source-verified typed boolean rejection helpers now retain canonical field predicates. Standard conditional Result aliases supply control-flow evidence only; they do not imply a payload type or validated identity. Ignored/conditional checks, opaque early-success macros, escaping arguments and differing source predicates retain conservative abstentions. No dependencies or production modules were added, and peer membership and numeric drift thresholds are unchanged.

@@ -1605,6 +1605,7 @@ for health in [handlers::health] {
 pub(super) struct TempRepo(PathBuf);
 
 impl TempRepo {
+    pub(super) fn path(&self) -> &Path { &self.0 }
     pub(super) fn new(name: &str, files: &[(&str, &str)]) -> Self {
         let root = std::env::temp_dir().join(format!("archer-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);

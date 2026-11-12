@@ -2,3 +2,5 @@
 
 # Python evaluation bytecode
 __pycache__/
+
+/demo/target/

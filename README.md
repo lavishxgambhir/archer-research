@@ -1,269 +1,130 @@
 # ARCHER
 
-## Active production pipeline
+ARCHER is a Rust/Actix-Web research prototype for finding repository-local authorization inconsistencies. It infers supported requirements from related routes; findings require source review and may reflect legitimate policy differences. It does not establish the application's intended policy or prove that a repository is secure.
 
-Source understanding now includes frozen offline Cargo workspace metadata, dependency aliases, and public module/type/function re-exports. Reports add exact handler-definition provenance and separate evidence/confidence/abstention records for membership, invariants, and drift. See `research/README.md` for current development evaluation and reserved final-evaluation cases. No drift support thresholds were relaxed.
+## Active pipeline
 
-`src/main.rs` calls `analyzer::analyze_repository`. The production flow is:
+**Route Discovery → Peer Groups → Authorization Invariants → Drift Detection**
 
-1. **Discover routes** (`analyzer.rs`): parse Rust files, index handlers, and resolve registrations across files.
-2. **Recover mount context** (`analyzer/registration.rs`): expand configuration callbacks, apply scope/application context, and merge duplicate observations.
-3. **Assess evidence** (`analyzer/security.rs`): record authentication, roles, permissions and ownership, distinguishing observed enforcement from uncertain checks. These assessments do not determine peer membership.
-4. **Form peer groups** (`policy_drift::discover` then `policy_drift::families`): use internal resource relationships to create explicit, explainable groups. Candidate relationships are internal discovery evidence.
-5. **Infer invariants and detect drift** (`policy_drift::infer`): collect policy support, check overlapping proposals, then compare each eligible target with its other peers. An authorization contract is the reported `AuthorizationInvariant`, not a second grouping system.
-6. **Report evidence**: `main.rs` renders the existing CLI/JSON; `analyzer/reporting.rs` builds graphs and selects change-aware results using the existing behavior.
+1. `src/analyzer.rs` indexes workspace source, imports, handlers and bounded calls. `registration.rs` expands supported route registrations, scopes and middleware mounts.
+2. `policy_drift.rs` forms explicit resource-related peer groups independently of authorization. Relationships may overlap; shared utilities alone do not establish peers.
+3. `security.rs` records authentication, role, permission and ownership requirements separately. It distinguishes observed rejection behavior from potential or unresolved checks.
+4. `policy_drift.rs` infers supported invariants and compares targets with other peers. `reporting.rs` builds the graph and compares base/current reports.
 
-For example, GET, PUT and DELETE `/documents/{id}` can form a resource peer group independent of their security checks. If GET and PUT enforce a verified `documents.manage` permission, they support an invariant. DELETE can produce a potential drift finding if its behavior is known and it lacks that requirement. Uncertain enforcement abstains. Two agreeing members can establish an invariant, while a drift comparison still requires two OTHER supporters. All existing thresholds and rules are unchanged by the maintenance refactor.
+Inference requires at least two agreeing supporters and a strict majority. Drift comparisons require two supporting **other** peers. Unknown enforcement, conflicting proposals and inadequate support cause abstention. These thresholds are unchanged by the release-correctness work.
 
-`analyzer/legacy.rs` retains the earlier prototype only under `cfg(test)`; production never calls it. Existing unit tests live in `analyzer/tests.rs`, `policy_drift_tests.rs` and `registration_security_tests.rs`. Shared policy bookkeeping stays in small private helpers inside `policy_drift.rs`; discovery and handler resolution remain together to avoid unnecessary module boundaries. `comparison_key` is shared by overlap/coverage bookkeeping, while source-registration and mounted-route identities retain their distinct existing semantics.
+`legacy.rs` is compiled only for historical tests. Production never calls its earlier inference or taxonomy implementation.
 
-Evaluation tools and labels live in `research/`. Downloaded repositories, frozen binaries and historical reports under `target/peer-evaluation/` are research inputs/evidence, not ARCHER source. Do not clear that directory as ordinary build cache. New refactor comparisons live separately under `target/refactor-verification/`; frozen Lemmy evidence is not regenerated. Evaluation metrics use `null` when observations are unavailable and zero only when a measurement supports zero.
+## Build and use
 
-
-**Repository-Aware Authorization Consistency & Drift Detection Framework**
-
-ARCHER is a deterministic, AST-based static analysis security framework designed to detect **authorization drift** in web applications (starting with Rust and Actix-Web). Rather than relying exclusively on hand-written static rules or treating endpoints in isolation, ARCHER infers **repository-local authorization contracts** across structurally and contextually related routes and flags deviations with complete source provenance.
-
-> **Security Research Tool:** ARCHER solves the "Oracle Problem" of authorization testing: it derives authorization invariants directly from peer consensus within the repository, categorizing drift into first-class security taxonomies (e.g. Missing Enforcement, Authentication-Only without Authorization, Insecure Direct Object Reference / Missing Ownership Validation, and Inconsistent Roles).
-
----
-
-## The Core Philosophy: Authorization Drift
-
-In modern web development, authorization is fractured across disparate architectural layers:
-- Route-level guards (`.guard(AdminGuard)`)
-- Scope middleware (`.wrap(AuthorizationMiddleware)`)
-- Handler-level role enforcement (`require_admin(&user)`)
-- Resource ownership validation (`is_owner(doc_id)`)
-- Extractors and session attributes (`AuthenticatedUser`, `Claims`)
-
-When a developer introduces a new route or modifies an existing handler, the application typically compiles cleanly and passes unit tests, yet violates implicit repository access-control invariants:
-
-```text
-GET /api/v1/admin/users       -> Guarded (AdminGuard)
-GET /api/v1/admin/reports     -> Checked (require_admin)
-GET /api/v1/admin/audit_logs  -> Wrapped (AuthorizationMiddleware)
-GET /api/v1/admin/analytics   -> NO AUTHORIZATION (Authorization Drift!)
+```powershell
+cargo build --locked
+cargo run --locked -- /path/to/repository
+cargo run --locked -- /path/to/repository --json
+cargo run --locked -- /path/to/repository --graph
+cargo run --locked -- /path/to/repository --explain /roles/{id}
+cargo run --locked -- /path/to/repository --diff HEAD~1 --json
 ```
 
-ARCHER detects these discrepancies automatically without requiring developers to manually write a custom query for every endpoint.
+Use `--offline` when dependencies are cached. The repository root is required for diff analysis. Paths and requirements in JSON carry source evidence; summary fields report discovered routes, groups, coverage, invariants, comparisons, findings and Unknown classifications separately.
 
----
+### Security classifications
 
-## Key Capabilities & Technical Highlights
+- **Protected:** observed authorization evidence under the supported source models. This is not proof of complete protection across every authorization dimension.
+- **Unprotected:** no recognized authorization enforcement under the supported analysis. This is not proof that all possible enforcement is absent. An authentication-only route can have this coarse classification while its authentication requirement is observed separately.
+- **Unknown:** unresolved handler, middleware, extractor or control-flow evidence prevents a reliable conclusion. Unknown is not an observed missing requirement.
 
-1. **Three-State Route Security Model:**
-   - `Protected`: Route has verified authorization evidence.
-   - `Unprotected`: Route handler is resolved and verified to lack authorization.
-   - `Unknown`: Security posture is indeterminate (unresolved external handler, ambiguous symbols, or opaque macro boundaries). *Unknown routes are never falsely reported as unprotected vulnerabilities.*
+Ignored boolean/Result checks, optional identities, unchecked extension insertion and unresolved dispatch must not automatically become enforced authorization. Required identity provenance remains unsupported in many real applications.
 
-2. **First-Class Drift Taxonomy:**
-   - `MissingEnforcement`: Peer routes enforce protection, but target route contains none.
-   - `AuthenticationOnlyWithoutAuthorization`: Route extracts identity (`Claims`, `AuthenticatedUser`) but never validates permissions or roles (CWE-285 / CWE-862).
-   - `MissingOwnershipValidation`: Parameterized resource route (`/{id}`) omits ownership verification where peers enforce it (IDOR / CWE-639).
-   - `InconsistentRoleOrPermission`: Route role policy deviates from consensus peer role.
-   - `InconsistentMechanism`: Architectural guard/middleware convention bypassed in favor of ad-hoc handler checks.
+## Production taxonomy
 
-3. **Authorization Relationship Graph (ARG):**
-   - Explicit graph representation connecting `Scope -> Route -> Handler -> Guard/Middleware -> Check -> InvariantContract -> Finding`.
-   - Exportable to Graphviz DOT format (`--graph`) for visual security architecture analysis.
+Exactly three categories are emitted by the active comparison engine:
 
-4. **Change-Aware Authorization Drift (`--diff`):**
-   - Integrates with Git to analyze commits, pull requests, or working tree modifications (`--diff [git-ref]`).
-   - Distinguishes newly introduced drift and authorization regressions from pre-existing repository debt.
+| Category | Actual comparison |
+|---|---|
+| `MissingEnforcement` | Supported authentication requirement is missing or deviates. |
+| `MissingOwnershipValidation` | Supported ownership requirement is missing or deviates. This is a potential inconsistency, not a proven IDOR exploit. |
+| `InconsistentRoleOrPermission` | Supported role/permission requirement is absent or differs. Role allowlists use set comparison; narrower allowlists are not treated as weaker, and no role hierarchy is assumed. |
 
-5. **Deep Route Explainability (`--explain`):**
-   - Detailed terminal breakdown (`--explain <path>`) presenting exact handler resolution, security status, peer consensus ratio, source provenance, and actionable remediation instructions.
+`AuthenticationOnlyWithoutAuthorization`, `InconsistentMechanism` and `UnresolvedSecurityPosture` remain compatibility enum variants, not active production finding categories. Unresolved posture is reported through assessments and abstentions. A role requirement absent from an authentication-only route is reported in the role/permission category, not a separate authentication-only category.
 
-6. **Operational Endpoint Discrimination:**
-   - Built-in recognition of public operational endpoints (`/health`, `/metrics`, `/status`, `/ping`, `/docs`, `/swagger`) preventing false positives in administrative or API scopes.
+## Change-aware analysis
 
----
+`--diff <base-ref>` analyzes committed base source in a disposable Git-object snapshot, then analyzes the current working tree with the **same analyzer**. It does not check out, reset, stash or commit the user's repository. With no reference, the base is `HEAD~1`.
 
-## Competitor & Research Comparison
+Finding identity uses HTTP method, literal route path, scope, matched application population, requirement dimension and sorted normalized expected policy values. Snapshot directories, source lines, group ordinals and changed-file membership do not define finding identity. Application correspondence requires unique endpoint overlap; ambiguous overlapping App populations fail explicitly rather than being merged.
 
-| Capability | Semgrep | CodeQL | ACMiner (USENIX/MobiSys '17) | RoleCast (USENIX Sec '11) | ARCHER |
-|---|---|---|---|---|---|
-| **Analysis Type** | AST Pattern Matching | Relational AST / Taint Datalog | Association Rule Mining | Context Variable Clustering | AST Peer Consensus & Contract Inference |
-| **Framework Awareness** | Syntactic / Generic | Extensible Libraries | Android IPC Middleware | Web Scripts (PHP/JSP) | Actix-Web / Framework IR |
-| **Needs Explicit Policy Rule?** | **Yes** (manual YAML rule) | **Yes** (bespoke QL query) | No (statistical mining) | No (data-sink clustering) | **No** (inferred from repository peers) |
-| **Solves Oracle Problem?** | No | No | Partial (statistical IPC) | Partial (DB write sinks) | **Yes** (Structural & resource peer consensus) |
-| **Three-State Model** | Binary match | Binary predicate | Threshold confidence | Threshold confidence | **Yes** (`Protected` / `Unprotected` / `Unknown`) |
-| **IDOR / Ownership Drift** | Complex custom rule | Taint path required | Not supported | Sensitive sink only | **Yes** (Parameterized resource consensus) |
-| **Graph Representation** | No | AST/CFG/PDG | IPC dependency graph | Calling context graph | **Authorization Relationship Graph (ARG)** |
-| **Change-Aware Diff Mode** | PR rule diff | Commit comparison | Batch re-analysis | Batch re-analysis | **Yes** (`--diff` contract impact analysis) |
+JSON preserves the earlier fields and additionally reports:
 
----
+- `newly_introduced_drifts`: supported current findings absent from base, excluding targets whose base enforcement is unresolved.
+- `unchanged_drifts`: same route/requirement findings in both reports.
+- `resolved_drifts`: removed routes or findings whose same requirement now has a supported satisfying comparison.
+- `unverified_drifts`: disappearance into abstention/lost comparison support, a current finding whose prior target evidence was unresolved, or changed requirement identities whose equivalence cannot be verified. These are not verified fixes or newly introduced weaknesses.
+- `regressions`: observed Protected→Unprotected transitions or a previously supported satisfying comparison that now deviates under the same expected contract. A new peer consensus alone is not proof of regression.
+- `base_summary`, `current_summary`, `analysis_warnings`: coverage and unresolved registration diagnostics for both analyses.
 
-## Technology Stack
+Invalid references, Git failures, parse failures and unsupported snapshot source modes are errors. Git submodules and source symlinks are rejected. The snapshot includes tracked Rust source and Cargo manifests/locks; build scripts and procedural macros are not executed. Unresolved source-model coverage remains visible rather than being interpreted as security. Findings removed by changed peer support can remain unverified. Arbitrary source reorganizations or changed App populations may prevent correspondence.
 
-| Component | Technology | Role |
-|---|---|---|
-| Language | **Rust** (2024 edition) | High-performance, memory-safe static analysis engine |
-| AST Engine | **`syn`** (v3.0) | High-fidelity Rust AST parsing, token streams, and visitor traversal |
-| Code Generation | **`quote`** / **`proc-macro2`** | AST symbol re-construction and span location tracking |
-| CLI Parser | **`clap`** (v4.6) | Command-line interface with subcommands and flags |
-| Serialization | **`serde`** / **`serde_json`** | Typed JSON report serialization |
-| File Traversal | **`walkdir`** (v2.5) | Fast, deterministic repository filesystem scanning |
+## Authorization Relationship Graph
 
----
+The ARG includes routes, application scopes, resolved module-qualified handlers, evidence, finding-backed contracts and findings. Handler identities include the application, definition file and qualified source path. Without a definition, graph construction uses a qualified call-site fallback scoped to its route rather than merging unresolved occurrences by short name.
 
-## Installation & Build
+Verified checks use enforcement relations; unresolved evidence uses `UnresolvedCheck` / `UnresolvedEvidence`. Potential identity evidence uses `PotentialEvidence`; an observed authentication check uses `ExtractsIdentity`. Graph evidence retains source locations. DOT identifiers, labels and edge endpoints escape quotes, backslashes and line breaks consistently.
 
-Ensure you have a recent Rust toolchain installed:
+## Reproducible live demonstration
 
-```bash
-# Clone the repository
-git clone https://github.com/Viditgupta-official/archer.git
-cd archer
+The executable Actix app in `demo` uses public, fixed demo credentials to make denial behavior reproducible. **These fixtures are not production authentication.** Its role checks propagate errors, and ownership predicates actually reject requests. No no-op helper is presented as authorization.
 
-# Build release binary
-cargo build --release --locked
+```powershell
+cargo build --locked
+cargo run --locked -- demo --json
+cargo test --manifest-path demo/Cargo.toml --locked
+python demo/reproduce.py
+python demo/reproduce.py --runtime
 ```
 
-The compiled binary will be available at `./target/release/archer`.
+The reproduction script creates disposable copies and Git repositories. It never edits `demo/src/main.rs` or the caller's Git state. It verifies a clean baseline and three isolated enforcement-removal mutations, including real `--diff HEAD` output. `--runtime` also executes Actix request tests on each clean/mutated copy; cached demo dependencies are required.
 
----
+Verified analyzer results:
 
-## Usage Guide
+| Demo | Routes | Groups / covered routes | Invariants | Compared routes | Findings |
+|---|---:|---:|---:|---:|---:|
+| Clean | 12 | 4 / 11 | 3 | 9 | 0 |
+| Role check removed | 12 | 4 / 11 | 3 | 7 | 1 role/permission |
+| Authentication check removed | 12 | 4 / 11 | 3 | 7 | 1 missing enforcement |
+| Ownership rejection removed | 12 | 4 / 11 | 3 | 7 | 1 ownership |
 
-### 1. Standard Repository Scan
-```bash
-cargo run --release -- /path/to/actix-web-repo
+The clean coarse classification is 8 Protected / 4 Unprotected / 0 Unknown: three authentication-only handlers account for three of the Unprotected labels. Authentication evidence is still observed for those handlers. Public `/public/info` and differing Member/Admin profile operations generate no findings. The two-member profile group has no common majority role contract and insufficient independent drift support; this is an abstention, not a proof that all differing policies are legitimate.
+
+The source markers identify mutations for the reproduction script; detector code contains no demo-specific rules. All three production categories have production-pipeline regression tests. These are controlled demonstrations, not evidence of naturally occurring vulnerabilities or broad generalization.
+
+To inspect the running app:
+
+```powershell
+cargo run --manifest-path demo/Cargo.toml --locked
+curl.exe -X DELETE http://127.0.0.1:8088/roles/owned -H "Authorization: Bearer demo-member"
+curl.exe -X DELETE http://127.0.0.1:8088/roles/owned -H "Authorization: Bearer demo-admin"
 ```
 
-### 2. Structured JSON Output
-```bash
-cargo run --release -- /path/to/actix-web-repo --json
+The clean app returns 403 then 200. Ownership requires `Bearer demo-owner` and resource ID `owned`; wrong credentials or a different resource are rejected.
+
+## Verification and research limits
+
+The current Rust suite contains **138 tests**, including the preserved 134 tests, plus **six Python reporting tests**. The demo has a separate Actix request test covering clean enforcement and legitimate policy differences. Reproduction additionally checks each mutation's actual HTTP behavior.
+
+```powershell
+cargo test --locked
+python research/test_evaluate.py
 ```
 
-### 3. Generate Authorization Relationship Graph (DOT Format)
-```bash
-cargo run --release -- /path/to/actix-web-repo --graph > auth_graph.dot
-# Render with Graphviz
-dot -Tpng auth_graph.dot -o auth_graph.png
-```
+Git-backed regression tests initialize only disposable fixture repositories. Restricted environments may need permission for those temporary Git operations. Existing compiler/cache warnings are not test failures.
 
-### 4. Change-Aware Drift Detection (Git Diff Mode)
-```bash
-# Compare current changes against HEAD~1 or a specific branch
-cargo run --release -- /path/to/actix-web-repo --diff HEAD~1
-```
+Lemmy is development/regression data, not a held-out benchmark. Its last measured baseline has 240 routes, 162 groups, six role invariants, 190 Unknown and zero supported drift comparisons. Its 62 TP / 0 FP / 4 FN peer result is a labeled development sample, not whole-repository accuracy. The separate actual-source mutation baseline remains 3 TP / 0 FP / 5 FN; the older controlled fixtures remain 6 TP / 0 FP / 0 FN. Unmeasured natural-vulnerability metrics are unavailable, not zero.
 
-### 5. Explain Route Authorization Contract
-```bash
-cargo run --release -- /path/to/actix-web-repo --explain /api/v1/admin/analytics
-```
+Consumed rustypaste and Meilisearch results are regression data. Macro-generated registration, complex identity/database provenance, runtime dispatch and opaque middleware remain significant limitations. Bounded cross-crate/constructor tracing is supported where source establishes the target; ARCHER is not a full Rust compiler, symbolic executor or multi-framework frontend.
 
----
+Current research notes are in `research/README.md`. Preserve historical evaluation evidence: generated snapshots, binaries and reports under ignored `target/` are not automatically included in ordinary Git pushes. Earlier evidence under `evidence/` remains historical, not rewritten by this release.
 
-## End-to-End Demonstration
+## Credits
 
-A complete representative Actix-Web application is provided in `./demo`:
-
-```rust
-// Administrative scope: 3 peers protected, 1 unprotected drift, 1 operational public
-cfg.service(
-    web::scope("/api/v1/admin")
-        .route("/users", web::get().to(admin_get_users))                           // require_admin()
-        .route("/reports", web::get().guard(AdminGuard).to(admin_get_reports))      // AdminGuard
-        .route("/audit_logs", web::get().wrap(AuthorizationMiddleware).to(admin_get_audit_logs)) // Middleware
-        .route("/analytics", web::get().to(admin_get_analytics))                   // ⚠️ DRIFT: MissingEnforcement
-        .route("/status", web::get().to(admin_get_status))                         // ✓ Operational Public (/status)
-);
-
-// Parameterized documents scope: 2 peers enforce ownership, 1 omits ownership
-cfg.service(
-    web::scope("/api/v1/documents")
-        .route("/{id}", web::get().to(get_document_by_id))        // is_owner()
-        .route("/{id}", web::delete().to(delete_document_by_id))  // verify_ownership()
-        .route("/{id}", web::put().to(update_document_by_id))     // ⚠️ DRIFT: MissingOwnershipValidation (IDOR)
-);
-```
-
-Running ARCHER against `demo`:
-```bash
-cargo run -- demo
-```
-Yields:
-```text
-============================================================
-ARCHER Authorization Analysis Report
-============================================================
-Repository Scanned : demo
-Rust Files Scanned : 1
-Route Inventory    : 10 routes (6 Protected, 4 Unprotected, 0 Unknown)
-Analysis Layers    : 3 Peer Groups, 3 Inferred Invariants
-------------------------------------------------------------
-...
-============================================================
-Potential Authorization Drift Findings (2):
-============================================================
-
-[1] MissingEnforcement (Confidence: High)
-  Suspicious Route : GET /api/v1/admin/analytics (demo\src\main.rs:94)
-  Inferred Contract: Peer routes under /api/v1/admin consistently contain authorization evidence.
-  Explanation      : Route in scope '/api/v1/admin' lacks recognized authorization protection while 3 peer routes consistently enforce authorization.
-  Remediation      : Apply the inferred authorization invariant to this route via a guard, middleware, or handler check.
-  Peer Consensus   : 3/4 authorized peers in group 'peer-group-001'
-
-[2] MissingOwnershipValidation (Confidence: Medium)
-  Suspicious Route : PUT /api/v1/documents/{id} (demo\src\main.rs:103)
-  Inferred Contract: Peer routes under /api/v1/documents consistently contain authorization evidence.
-  Explanation      : Peer parameterized resource routes enforce resource ownership validation, but this route does not validate that the authenticated entity owns the requested resource (IDOR risk).
-  Remediation      : Add ownership verification logic (e.g. `check_ownership(user_id, resource_id)`) before serving sensitive resource data.
-  Peer Consensus   : 2/3 authorized peers in group 'peer-group-002'
-```
-
----
-
-## Test Suite & Validation
-
-The test suite contains **55 unit and regression tests** covering:
-- Lexical scoping and handler resolution across files and modules
-- Guard and middleware builder chain inheritance
-- Macro-based authorization evidence and non-check keyword filtering
-- Three-state security classification (`Protected`, `Unprotected`, `Unknown`)
-- Drift categorization (Authentication-only, Missing ownership, Role mismatch)
-- Operational endpoint exclusion (`/health`, `/metrics`, `/status`)
-- Parameterized route scope fallback
-- Authorization Relationship Graph generation and DOT serialization
-
-Execute the test suite:
-```bash
-cargo test
-```
-All 55 tests pass deterministically.
-
----
-
-## Known Scope & Future Framework Architecture
-
-ARCHER is engineered around a clean abstraction decoupling framework-specific frontends from the authorization reasoning core:
-```text
-Framework Frontends (Actix-Web, Axum, FastAPI, Express)
-                   │
-                   ▼
-       Universal Route & Auth IR (URAIR)
-                   │
-                   ▼
-  ARCHER Core (Peer Clustering & Invariant Engine)
-                   │
-                   ▼
-   ARG & Change-Aware Regression Analyzer
-                   │
-                   ▼
-         Multi-Format Reporting
-```
-
-Current limitations:
-- Trait/impl method handlers with dynamic dispatch are categorized as `Unknown`.
-- Inter-procedural helper call-depth beyond direct invocations requires whole-program call-graph construction.
-- Macros with unrecognized identifiers are not expanded.
-
----
-
-## Authors & Maintenance
-
-ARCHER is developed as an academic security research prototype for authorization consistency verification.
-Maintainer: Vidit Gupta (`viditgupta.official@gmail.com`).
+ARCHER originated with Vidit Gupta. This repository contains subsequent research and evaluation work by Lavish Gambhir. Historical commit attribution is preserved.
