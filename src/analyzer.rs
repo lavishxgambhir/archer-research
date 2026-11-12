@@ -302,6 +302,7 @@ pub enum NodeKind {
     IdentityExtraction,
     InvariantContract,
     Finding,
+    UnresolvedCheck,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -326,6 +327,8 @@ pub enum EdgeRelation {
     ImplementsContract,
     ViolatesContract,
     FlagsRoute,
+    UnresolvedEvidence,
+    PotentialEvidence,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -339,6 +342,10 @@ pub struct GraphEdge {
 pub struct AuthorizationRelationshipGraph {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
+}
+
+fn dot_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"").replace('\r', "\\r").replace('\n', "\\n")
 }
 
 impl AuthorizationRelationshipGraph {
@@ -359,11 +366,12 @@ impl AuthorizationRelationshipGraph {
                 NodeKind::IdentityExtraction => ("#f8cecc", "parallelogram"),
                 NodeKind::InvariantContract => ("#e1d5e7", "septagon"),
                 NodeKind::Finding => ("#f8cecc", "octagon"),
+                NodeKind::UnresolvedCheck => ("#eeeeee", "diamond"),
             };
             dot.push_str(&format!(
                 "  \"{}\" [label=\"{}\", fillcolor=\"{}\", style=\"filled,rounded\", shape={}];\n",
-                node.id,
-                node.label.replace('"', "\\\""),
+                dot_escape(&node.id),
+                dot_escape(&node.label),
                 color,
                 shape
             ));
@@ -378,7 +386,7 @@ impl AuthorizationRelationshipGraph {
             };
             dot.push_str(&format!(
                 "  \"{}\" -> \"{}\" [label=\"{:?}\", {}];\n",
-                edge.from, edge.to, edge.relation, style
+                dot_escape(&edge.from), dot_escape(&edge.to), edge.relation, style
             ));
         }
 
@@ -395,6 +403,11 @@ pub struct DiffAnalysisReport {
     pub newly_introduced_drifts: Vec<Finding>,
     pub regressions: Vec<RouteRegression>,
     pub unchanged_drifts: Vec<Finding>,
+    pub resolved_drifts: Vec<Finding>,
+    pub unverified_drifts: Vec<Finding>,
+    pub base_summary: Option<AnalysisSummary>,
+    pub current_summary: Option<AnalysisSummary>,
+    pub analysis_warnings: Vec<String>,
     pub summary: String,
 }
 
@@ -907,67 +920,173 @@ impl<'ast> Visit<'ast> for RouteVisitor<'_> {
     }
 }
 
+pub(super) struct AttributeRouteInfo {
+    pub(super) path: String,
+    pub(super) methods: Vec<String>,
+    pub(super) line: usize,
+    modifiers: Vec<String>,
+}
+
+fn attribute_route_name(attribute: &syn::Attribute) -> Option<String> {
+    let path = attribute.path();
+    if !(path.segments.len() == 1
+        || (path.segments.len() == 2 && path.segments[0].ident == "actix_web"))
+    {
+        return None;
+    }
+    let name = path.segments.last()?.ident.to_string();
+    matches!(
+        name.as_str(),
+        "get"
+            | "post"
+            | "put"
+            | "patch"
+            | "delete"
+            | "head"
+            | "options"
+            | "trace"
+            | "connect"
+            | "route"
+    )
+    .then_some(name)
+}
+
+pub(super) fn parse_attribute_route(attribute: &syn::Attribute) -> Option<AttributeRouteInfo> {
+    let name = attribute_route_name(attribute)?;
+    let args = attribute
+        .parse_args_with(syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated)
+        .ok()?;
+    let Expr::Lit(ExprLit {
+        lit: Lit::Str(path),
+        ..
+    }) = args.first()?
+    else {
+        return None;
+    };
+    let mut methods = if name == "route" {
+        Vec::new()
+    } else {
+        vec![name.to_uppercase()]
+    };
+    let mut modifiers = Vec::new();
+    for arg in args.iter().skip(1) {
+        let Expr::Assign(assign) = arg else {
+            return None;
+        };
+        let Expr::Path(key) = &*assign.left else {
+            return None;
+        };
+        let Expr::Lit(ExprLit {
+            lit: Lit::Str(value),
+            ..
+        }) = &*assign.right
+        else {
+            return None;
+        };
+        if key.path.is_ident("method") && name == "route" {
+            let method = value.value();
+            if !matches!(
+                method.as_str(),
+                "GET"
+                    | "POST"
+                    | "PUT"
+                    | "PATCH"
+                    | "DELETE"
+                    | "HEAD"
+                    | "OPTIONS"
+                    | "TRACE"
+                    | "CONNECT"
+            ) {
+                return None;
+            }
+            if !methods.contains(&method) {
+                methods.push(method);
+            }
+        } else if key.path.is_ident("wrap") || key.path.is_ident("guard") {
+            modifiers.push(format!("{} = {}", key.to_token_stream(), value.value()));
+        } else {
+            return None;
+        }
+    }
+    // A generic route attribute must supply methods; never invent GET.
+    if methods.is_empty() {
+        return None;
+    }
+    Some(AttributeRouteInfo {
+        path: path.value(),
+        methods,
+        line: path.span().start().line,
+        modifiers,
+    })
+}
+
 impl RouteVisitor<'_> {
     fn add_attribute_routes(&mut self, node: &ItemFn) {
         for attribute in &node.attrs {
-            let Some(method) = attribute_route_method(attribute) else {
-                continue;
-            };
-            let Ok(path_literal) = attribute.parse_args::<syn::LitStr>() else {
-                self.diagnostic(
-                    "unsupported_attribute",
-                    attribute.span().start().line,
-                    "Route attribute arguments require a supported literal path",
-                );
+            // An explicit conflicting/foreign import overrides a bare macro name.
+            // Do not treat another framework's `get` as Actix registration.
+            if attribute.path().segments.len() == 1 {
+                let name = attribute.path().segments[0].ident.to_string();
+                if let Some(imports) = self
+                    .index
+                    .scopes
+                    .get(&(self.crate_key.clone(), self.module.clone()))
+                    .and_then(|scope| scope.imports.get(&name))
+                {
+                    if imports.len() != 1
+                        || imports[0].segments != ["actix_web".to_string(), name.clone()]
+                    {
+                        if attribute_route_name(attribute).is_some() {
+                            self.diagnostic(
+                                "unsupported_attribute",
+                                attribute.span().start().line,
+                                "Route attribute import is foreign, renamed or ambiguous",
+                            );
+                        }
+                        continue;
+                    }
+                }
+            }
+            let Some(info) = parse_attribute_route(attribute) else {
+                if attribute_route_name(attribute).is_some() {
+                    self.diagnostic("unsupported_attribute", attribute.span().start().line,
+                        "Route attribute requires a literal path, explicit valid methods and supported literal arguments");
+                }
                 continue;
             };
 
             let prefix = self.scope_context.clone();
-            let path = join_paths(&prefix, &path_literal.value());
+            let path = join_paths(&prefix, &info.path);
             let handler = node.sig.ident.to_string();
-            let authorization = handler_evidence(&self.file, node);
+            let mut authorization = handler_evidence(&self.file, node);
+            for modifier in info.modifiers {
+                authorization.push(AuthEvidence {
+                    kind: AuthEvidenceKind::Unknown,
+                    mechanism: "UnresolvedAttributeConfiguration".into(),
+                    symbol: Some(modifier),
+                    file: self.file.clone(),
+                    line: info.line,
+                    handler: Some(handler.clone()),
+                    strength: AuthStrength::Weak,
+                });
+            }
 
-            self.routes.push(Route {
-                application: self.application.clone(),
-                method: method.into(),
-                path,
-                scope_prefix: prefix,
-                authorization,
-                handler_path: Some(handler.clone()),
-                handler_resolution: Some(HandlerResolution::Definition),
-                handler: Some(handler),
-                line: path_literal.span().start().line,
-                file: self.file.clone(),
-            });
+            for method in info.methods {
+                self.routes.push(Route {
+                    application: self.application.clone(),
+                    method,
+                    path: path.clone(),
+                    scope_prefix: prefix.clone(),
+                    authorization: authorization.clone(),
+                    handler_path: Some(handler.clone()),
+                    handler_resolution: Some(HandlerResolution::Definition),
+                    handler: Some(handler.clone()),
+                    line: info.line,
+                    file: self.file.clone(),
+                });
+            }
         }
     }
-}
-
-fn attribute_route_method(attribute: &syn::Attribute) -> Option<&'static str> {
-    for (name, method) in [
-        ("get", "GET"),
-        ("post", "POST"),
-        ("put", "PUT"),
-        ("patch", "PATCH"),
-        ("delete", "DELETE"),
-        ("head", "HEAD"),
-    ] {
-        if attribute.path().is_ident(name)
-            || (attribute
-                .path()
-                .segments
-                .first()
-                .is_some_and(|s| s.ident == "actix_web")
-                && attribute
-                    .path()
-                    .segments
-                    .last()
-                    .is_some_and(|s| s.ident == name))
-        {
-            return Some(method);
-        }
-    }
-    None
 }
 
 fn first_string_arg(args: &syn::punctuated::Punctuated<Expr, syn::token::Comma>) -> Option<String> {
@@ -3344,8 +3463,7 @@ pub fn analyze_repository(root: &Path) -> Result<Report> {
         drift_findings_count: finding_details.len(),
     });
 
-    let graph = Some(build_authorization_graph(&routes, &finding_details));
-    let handler_resolution_evidence = routes
+    let handler_resolution_evidence: Vec<_> = routes
         .iter()
         .map(|route| {
             let definition = index.route_handler(route);
@@ -3366,6 +3484,7 @@ pub fn analyze_repository(root: &Path) -> Result<Report> {
         })
         .collect();
 
+    let graph = Some(reporting::graph_with_definitions(&routes, &finding_details, &handler_resolution_evidence, &security_assessments));
     Ok(Report {
         candidate_relationships,
         analysis_evidence,

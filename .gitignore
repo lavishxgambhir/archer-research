@@ -5,3 +5,4 @@ __pycache__/
 
 **/target/
 .DS_Store
+/demo/target/

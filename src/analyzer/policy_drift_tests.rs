@@ -1588,3 +1588,265 @@ fn app(c: &mut Config) { c.route("/one",web::get().to(one)).route("/two",web::ge
             .any(|r| r.contains("No unique applicable implementation"))
     );
 }
+
+#[test]
+fn root_routes_without_shared_resources_never_form_peer_groups() {
+    let source = r#"
+async fn landing() { respond("welcome to landing page"); }
+async fn upload() { respond("file uploaded"); }
+async fn check() { respond("ok"); }
+fn app(c: &mut Config) {
+    c.route("/", web::get().to(landing))
+     .route("/", web::post().to(upload))
+     .route("/", web::head().to(check));
+}
+"#;
+    let report = TempRepo::new("root-routes-unrelated", &[("main.rs", source)]).analyze();
+    assert_eq!(report.routes.len(), 3);
+    assert!(
+        report.peer_groups.is_empty(),
+        "Unrelated root routes with no shared resources must not form peer groups: {:?}",
+        report.peer_groups
+    );
+}
+
+#[test]
+fn root_routes_with_shared_database_resource_form_corroborated_peer_group() {
+    let source = r#"
+async fn list_root() { let _ = sqlx::query("SELECT * FROM items"); }
+async fn create_root() { let _ = sqlx::query("INSERT INTO items VALUES (1)"); }
+fn app(c: &mut Config) {
+    c.route("/", web::get().to(list_root))
+     .route("/", web::post().to(create_root));
+}
+"#;
+    let report = TempRepo::new("root-routes-related", &[("main.rs", source)]).analyze();
+    assert_eq!(report.routes.len(), 2);
+    assert_eq!(
+        report.peer_groups.len(),
+        1,
+        "Genuinely related root routes sharing a database table must form a peer group"
+    );
+    assert_eq!(report.peer_groups[0].routes.len(), 2);
+    assert!(report.peer_groups[0]
+        .routes
+        .iter()
+        .any(|r| r.handler.as_deref() == Some("list_root")));
+    assert!(report.peer_groups[0]
+        .routes
+        .iter()
+        .any(|r| r.handler.as_deref() == Some("create_root")));
+}
+
+#[test]
+fn multi_method_attribute_routes_register_each_operation() {
+    let source = r#"
+#[route("/files/{id}", method = "GET", method = "HEAD")]
+async fn serve_file() { respond("data"); }
+
+#[get("/items")]
+#[head("/items")]
+async fn get_and_head_items() { respond("items"); }
+
+#[get("/wrapped", wrap = "Logger::default()")]
+async fn wrapped_handler() { respond("wrapped"); }
+
+fn app(c: &mut Config) {
+    c.service(serve_file)
+     .service(get_and_head_items)
+     .service(wrapped_handler);
+}
+"#;
+    let report = TempRepo::new("multi-method-attrs", &[("main.rs", source)]).analyze();
+    assert!(report
+        .routes
+        .iter()
+        .any(|r| r.method == "GET" && r.path == "/files/{id}"));
+    assert!(report
+        .routes
+        .iter()
+        .any(|r| r.method == "HEAD" && r.path == "/files/{id}"));
+    assert!(report
+        .routes
+        .iter()
+        .any(|r| r.method == "GET" && r.path == "/items"));
+    assert!(report
+        .routes
+        .iter()
+        .any(|r| r.method == "HEAD" && r.path == "/items"));
+    assert!(report
+        .routes
+        .iter()
+        .any(|r| r.method == "GET" && r.path == "/wrapped"));
+}
+
+#[test]
+fn unresolved_middleware_produces_dimension_aware_diagnostic_uncertainty() {
+    let source = r#"
+async fn one() { check_role("Admin")?; sqlx::query("SELECT * FROM docs"); }
+async fn two() { check_role("Admin")?; sqlx::query("SELECT * FROM docs"); }
+async fn three() { sqlx::query("SELECT * FROM docs"); }
+fn app(c: &mut Config) {
+    c.service(
+        web::scope("/docs")
+            .wrap(SessionMiddleware::builder())
+            .route("/one", web::get().to(one))
+            .route("/two", web::get().to(two))
+            .route("/three", web::get().to(three))
+    );
+}
+"#;
+    let report = TempRepo::new("unresolved-middleware-diag", &[("main.rs", source)]).analyze();
+    let three_evidence: Vec<_> = report
+        .analysis_evidence
+        .iter()
+        .filter(|e| {
+            e.route.as_ref().and_then(|r| r.handler.as_deref()) == Some("three")
+                && e.stage == "drift"
+        })
+        .collect();
+    assert!(!three_evidence.is_empty());
+    assert!(
+        three_evidence.iter().any(|e| {
+            e.dimension.as_deref() == Some("authentication")
+                && e.abstention_reasons
+                    .iter()
+                    .any(|r| r.contains("names do not prove behavior"))
+        }),
+        "Expected authentication-specific middleware diagnostic, found: {:?}",
+        three_evidence
+    );
+    assert_eq!(report.finding_details.len(), 0);
+}
+
+#[test]
+fn trait_parameters_need_values_even_with_one_visible_implementation() {
+    for ty in ["&dyn Store", "Box<dyn Store>", "std::sync::Arc<dyn Store>"] {
+        let source = format!(
+            r#"
+trait Store {{fn load(&self)->Row;}}
+struct Row; struct Disk;
+impl Store for Disk {{fn load(&self)->Row {{sqlx::query("SELECT * FROM records"); Row}}}}
+async fn one(repo:{ty}) {{let row=repo.load(); response(row);}}
+async fn two(repo:{ty}) {{let row=repo.load(); response(row);}}
+fn app(c:&mut Config) {{c.route("/alpha",web::get().to(one)).route("/beta",web::get().to(two));}}
+"#
+        );
+        let report = TempRepo::new("unproven-single-trait", &[("main.rs", &source)]).analyze();
+        assert!(
+            report.peer_groups.is_empty(),
+            "{ty}: {:?}",
+            report.resource_evidence
+        );
+        assert!(
+            report
+                .resource_evidence
+                .iter()
+                .all(|e| !e.resources.iter().any(|r| r.contains("records"))),
+            "{ty}"
+        );
+    }
+}
+
+#[test]
+fn attribute_methods_and_arguments_are_not_guessed() {
+    for text in [
+        "#[route(\"/x\")]",
+        "#[route(\"/x\", method=method())]",
+        "#[route(\"/x\", method=\"get\")]",
+        "#[route(\"/x\", method=\"BAD METHOD\")]",
+        "#[get(path())]",
+        "#[get(\"/x\", method=\"POST\")]",
+        "#[get(\"/x\", unknown=\"setting\")]",
+        "#[get(\"/x\", wrap=unchecked())]",
+        "#[foreign::get(\"/x\")]",
+        "#[actix_web::foreign::get(\"/x\")]",
+    ] {
+        let syntax: syn::ItemFn =
+            syn::parse_str(&format!("{text} async fn handler() {{}} ")).unwrap();
+        assert!(parse_attribute_route(&syntax.attrs[0]).is_none(), "{text}");
+    }
+    let source = r#"
+#[route("/invalid")] async fn invalid() {}
+#[actix_web::route("/valid",method="GET",method="HEAD",method="GET")]
+async fn valid() {}
+fn app(c:&mut Config) {c.service(invalid).service(valid);}
+"#;
+    let report = TempRepo::new("invalid-attribute-evidence", &[("main.rs", source)]).analyze();
+    assert!(!report.routes.iter().any(|r| r.path == "/invalid"));
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "unsupported_attribute"));
+    for method in ["GET", "HEAD"] {
+        assert_eq!(
+            report
+                .routes
+                .iter()
+                .filter(|r| r.path == "/valid" && r.method == method)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn attribute_wrappers_and_guards_preserve_uncertainty_at_mounts() {
+    for key in ["wrap", "guard"] {
+        let source = format!(
+            r#"
+#[get("/x",{key}="SomeAdapter::new()")]
+async fn handler() {{}}
+fn app(c:&mut Config) {{c.service(web::scope("/api").service(handler));}}
+"#
+        );
+        let report =
+            TempRepo::new("attribute-config-uncertainty", &[("main.rs", &source)]).analyze();
+        let route = report.routes.iter().find(|r| r.path == "/api/x").unwrap();
+        assert!(route
+            .authorization
+            .iter()
+            .any(|e| e.kind == AuthEvidenceKind::Unknown
+                && e.mechanism == "UnresolvedAttributeConfiguration"));
+        assert!(matches!(
+            route.security_status(),
+            RouteSecurityStatus::Unknown { .. }
+        ));
+        assert!(report.finding_details.is_empty());
+    }
+}
+
+#[test]
+fn root_routes_shared_auxiliary_access_does_not_prove_resource_identity() {
+    let source = r#"
+struct Settings;
+impl Settings {pub fn read()->Self {sqlx::query("SELECT * FROM settings");Self}}
+async fn one() {Settings::read(); response("landing");}
+async fn two() {Settings::read(); response("upload");}
+fn app(c:&mut Config) {c.route("/",web::get().to(one)).route("/",web::post().to(two));}
+"#;
+    let report = TempRepo::new("root-auxiliary-negative", &[("main.rs", source)]).analyze();
+    assert!(report.peer_groups.is_empty());
+}
+
+#[test]
+fn explicit_foreign_or_conflicting_attribute_imports_do_not_create_routes() {
+    for imports in [
+        "use other_framework::get;",
+        "use actix_web::get; use other_framework::get;",
+        "use other_framework::post as get;",
+    ] {
+        let source = format!(
+            r#"{imports}
+#[get("/decoy")] async fn handler() {{}}
+fn app(c:&mut Config) {{c.service(handler);}}
+"#
+        );
+        let report = TempRepo::new("foreign-attribute-import", &[("main.rs", &source)]).analyze();
+        assert!(report.routes.is_empty(), "{imports}");
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "unsupported_attribute"));
+    }
+}

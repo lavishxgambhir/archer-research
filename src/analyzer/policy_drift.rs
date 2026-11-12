@@ -915,6 +915,7 @@ fn coerce_receiver(
     value: Option<Receiver>,
 ) -> Option<Receiver> {
     if let Some(trait_key) = trait_receiver(index, caller, ty, 0) {
+        // A visible implementation is not evidence of the value supplied at runtime.
         let mut value = value?;
         if value
             .dispatch_trait
@@ -1677,10 +1678,9 @@ fn receiver_calls<'a>(
     for input in &handler.function.sig.inputs {
         if let FnArg::Typed(arg) = input {
             if let Pat::Ident(name) = &*arg.pat {
-                visitor.bindings.insert(
-                    name.ident.to_string(),
-                    concrete_receiver(index, handler, &arg.ty, 0).map(Receiver::from),
-                );
+                let receiver = coerce_receiver(index, handler, &arg.ty, None)
+                    .or_else(|| concrete_receiver(index, handler, &arg.ty, 0).map(Receiver::from));
+                visitor.bindings.insert(name.ident.to_string(), receiver);
             }
         }
     }
@@ -2016,7 +2016,13 @@ pub(super) fn discover(
                 continue;
             }
             let (pa, pb) = (&paths[left], &paths[right]);
-            let same_path = pa == pb;
+            let common: std::collections::BTreeSet<_> = facts[left]
+                .intersection(&facts[right])
+                .filter(|s| !s.starts_with('@'))
+                .cloned()
+                .collect();
+            let is_root_path = pa.is_empty() && pb.is_empty();
+            let same_path = pa == pb && (!is_root_path || !common.is_empty());
             let collection = (pa.len() + 1 == pb.len()
                 && pb.last().is_some_and(|s| s == "{}")
                 && pb.starts_with(pa))
@@ -2025,11 +2031,6 @@ pub(super) fn discover(
                     && pa.starts_with(pb));
             let siblings =
                 pa.len() == pb.len() && pa.len() > 1 && pa[..pa.len() - 1] == pb[..pb.len() - 1];
-            let common: std::collections::BTreeSet<_> = facts[left]
-                .intersection(&facts[right])
-                .filter(|s| !s.starts_with('@'))
-                .cloned()
-                .collect();
             if !(same_path || collection || siblings || !common.is_empty()) {
                 continue;
             }
@@ -2152,6 +2153,17 @@ fn membership(r: &Relationship, routes: &[Route]) -> bool {
         || r.conflicts
             .iter()
             .any(|c| c == "known database resources differ")
+    {
+        return false;
+    }
+    let a_is_root = a.path == "/" || a.path.is_empty();
+    let b_is_root = b.path == "/" || b.path.is_empty();
+    if a_is_root
+        && b_is_root
+        && !r
+            .evidence
+            .iter()
+            .any(|e| e.starts_with("shared resolved resource:"))
     {
         return false;
     }
@@ -2451,12 +2463,28 @@ pub(super) fn infer(
                     .iter()
                     .any(|e| e.kind == AuthEvidenceKind::Unknown)
             {
+                let unknown_syms: Vec<String> = target
+                    .route
+                    .authorization
+                    .iter()
+                    .filter(|e| e.kind == AuthEvidenceKind::Unknown)
+                    .filter_map(|e| e.symbol.clone())
+                    .collect();
                 for dimension in DIMENSIONS {
+                    let reason = if unknown_syms.is_empty() {
+                        "Target enforcement is unresolved or contains unknown security behavior"
+                            .to_string()
+                    } else {
+                        format!(
+                            "Target enforcement is unresolved for {dimension}; unresolved symbols (names do not prove behavior): {}",
+                            unknown_syms.join(", ")
+                        )
+                    };
                     explanations.push(StageEvidence::drift(
                         group,
                         target,
                         dimension,
-                        "Target enforcement is unresolved or contains unknown security behavior",
+                        &reason,
                         vec![],
                     ));
                 }

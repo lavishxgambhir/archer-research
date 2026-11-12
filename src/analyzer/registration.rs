@@ -189,7 +189,7 @@ impl RouteVisitor<'_> {
                 .function
                 .attrs
                 .iter()
-                .any(|a| attribute_route_method(a).is_some())
+                .any(|a| attribute_route_name(a).is_some())
         {
             child.add_attribute_routes(&definition.function);
             for route in &mut child.routes {

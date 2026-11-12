@@ -52,6 +52,17 @@ fn main() -> Result<()> {
             println!("  - {}", file.display());
         }
         println!("Affected Routes   : {}", diff_report.affected_routes.len());
+        println!("Unchanged Drifts  : {}", diff_report.unchanged_drifts.len());
+        println!("Resolved Drifts   : {}", diff_report.resolved_drifts.len());
+        println!(
+            "Unverified Drifts : {}",
+            diff_report.unverified_drifts.len()
+        );
+        println!("Regressions       : {}", diff_report.regressions.len());
+        println!(
+            "Analysis warnings : {}",
+            diff_report.analysis_warnings.len()
+        );
         println!(
             "New Drift Findings: {}",
             diff_report.newly_introduced_drifts.len()
@@ -77,7 +88,9 @@ fn main() -> Result<()> {
                 println!();
             }
         } else {
-            println!("✓ No newly introduced authorization drift detected in changed routes.");
+            println!(
+                "No newly introduced supported drift detected; inspect coverage, warnings and unverified findings."
+            );
         }
 
         return Ok(());
