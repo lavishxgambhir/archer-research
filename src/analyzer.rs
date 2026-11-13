@@ -402,6 +402,8 @@ pub struct DiffAnalysisReport {
     pub affected_routes: Vec<RouteReference>,
     pub newly_introduced_drifts: Vec<Finding>,
     pub regressions: Vec<RouteRegression>,
+    pub baseline_regression_checks: Vec<BaselineRegressionCheck>,
+    pub baseline_comparison_routes: usize,
     pub unchanged_drifts: Vec<Finding>,
     pub resolved_drifts: Vec<Finding>,
     pub unverified_drifts: Vec<Finding>,
@@ -417,6 +419,18 @@ pub struct RouteRegression {
     pub reason: String,
 }
 
+/// A baseline-relative observation, not a standalone peer finding or vulnerability.
+#[derive(Debug, Clone, Serialize)]
+pub struct BaselineRegressionCheck {
+    pub route: RouteReference,
+    pub dimension: String,
+    pub change: String,
+    pub status: String,
+    pub before: Vec<String>,
+    pub after: Vec<String>,
+    pub reason: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct HandlerResolutionEvidence {
     pub route: RouteReference,
@@ -429,7 +443,10 @@ pub struct HandlerResolutionEvidence {
 #[derive(Debug, Serialize)]
 pub struct Report {
     #[serde(skip_serializing)]
+    pub local_rejections: Vec<security::LocalRejection>,
     pub candidate_relationships: Vec<policy_drift::Relationship>,
+    pub review_observations: Vec<policy_drift::ReviewObservation>,
+    pub check_comparisons: Vec<security::CheckContrast>,
     pub analysis_evidence: Vec<policy_drift::StageEvidence>,
     pub resource_evidence: Vec<policy_drift::ResourceEvidence>,
     pub handler_resolution_evidence: Vec<HandlerResolutionEvidence>,
@@ -1298,7 +1315,7 @@ fn configuration_call_evidence(
         evidence.push(AuthEvidence {
             kind,
             mechanism: identifier.name.clone(),
-            symbol: Some(identifier.name),
+            symbol: Some(if matches!(arg, Expr::Call(_)) { arg.to_token_stream().to_string() } else { identifier.name }),
             file: file.to_path_buf(),
             line: identifier.line,
             handler: handler.map(str::to_owned),
@@ -3485,7 +3502,13 @@ pub fn analyze_repository(root: &Path) -> Result<Report> {
         .collect();
 
     let graph = Some(reporting::graph_with_definitions(&routes, &finding_details, &handler_resolution_evidence, &security_assessments));
+    let local_rejections = security::local_rejections(&routes, &index);
+    let review_observations = policy_drift::reviews(&peer_groups, &security_assessments, &finding_details);
+    let check_comparisons = security::check_contrasts(&routes, &candidate_relationships, &security_assessments, &index);
     Ok(Report {
+        check_comparisons,
+        review_observations,
+        local_rejections,
         candidate_relationships,
         analysis_evidence,
         resource_evidence,

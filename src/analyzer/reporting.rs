@@ -553,6 +553,51 @@ fn checked_analysis(root: &Path) -> Result<Report> {
     }
     Ok(report)
 }
+fn baseline_checks(
+    base:&Report,current:&Report,ba:&HashMap<Option<String>,usize>,ca:&HashMap<Option<String>,usize>,
+    base_root:&Path,current_root:&Path,regressions:&[RouteRegression],
+)->Vec<BaselineRegressionCheck> {
+    fn policies(a:&security::Assessment,dimension:&str,root:&Path)->Vec<Vec<String>> {
+        let mut result:Vec<_>=a.requirements.iter().filter(|r|r.dimension==dimension && r.enforcement==security::Enforcement::Observed)
+            .map(|r|{let mut v=if dimension=="authentication" {vec!["authenticated identity".into()]} else {r.values.iter().map(|v|normalized(v,root)).collect()};v.sort();v.dedup();v})
+            .filter(|v|!v.is_empty()).collect();result.sort();result.dedup();result
+    }
+    let mut checks=Vec::new();
+    for old in &base.security_assessments {
+        let key=route_identity(&old.route,ba);
+        let candidates:Vec<_>=current.security_assessments.iter().filter(|a|route_identity(&a.route,ca)==key).collect();
+        // A duplicate route observation is not an unambiguous baseline match.
+        let [now]=candidates.as_slice() else {continue;};
+        for dimension in ["authentication","roles","permissions","ownership"] {
+            let before=policies(old,dimension,base_root);if before.is_empty() {continue;}
+            let after=policies(now,dimension,current_root);
+            if before==after {continue;}
+            // Preserve alternate observed enforcement; role allowlists may narrow.
+            if before.iter().all(|expected|after.iter().any(|actual|actual==expected ||
+                (dimension=="roles" && !actual.is_empty() && actual.iter().all(|v|expected.contains(v))))) {continue;}
+            let unresolved=matches!(old.route.status,RouteSecurityStatus::Unknown{..}) || matches!(now.route.status,RouteSecurityStatus::Unknown{..}) ||
+                old.requirements.iter().chain(now.requirements.iter()).any(|r|r.enforcement==security::Enforcement::Unresolved);
+            let supported=!unresolved && regressions.iter().any(|r|route_identity(&r.route,ca)==key);
+            checks.push(BaselineRegressionCheck{
+                route:now.route.clone(),dimension:dimension.into(),change:if after.is_empty(){"ObservedRequirementLost"}else{"ObservedPolicyChanged"}.into(),
+                status:if supported {"SupportedByExistingDiffAnalysis"} else {"ReviewRequired"}.into(),
+                before:before.iter().map(|v|v.join(", ")).collect(),after:after.iter().map(|v|v.join(", ")).collect(),
+                reason:if supported {"The existing posture/policy diff supports a regression; this is not a proof of exploitability."}
+                    else {"Previously observed evidence is no longer equivalent. Unresolved behavior, alternate policies or lost source resolution prevent a confirmed effective regression. Review the complete request path."}.into(),
+            });
+        }
+    }
+    for old in &base.local_rejections {
+        let key=route_identity(&old.route,ba);
+        let candidates:Vec<_>=current.routes.iter().filter(|r|route_identity(&RouteReference::from(*r),ca)==key).collect();
+        let [now]=candidates.as_slice() else {continue;};
+        if current.local_rejections.iter().any(|r|route_identity(&r.route,ca)==key && r.condition==old.condition) {continue;}
+        checks.push(BaselineRegressionCheck{route:RouteReference::from(*now),dimension:"unclassified_rejection".into(),change:"LocalRejectionChanged".into(),status:"ReviewRequired".into(),
+            before:vec![old.condition.clone()],after:vec![],reason:"A previously explicit Result error-return branch is absent or refactored. Its authorization meaning, replacement enforcement and position relative to side effects are unverified; this is not an ownership finding or confirmed vulnerability.".into()});
+    }
+    checks
+}
+
 pub fn analyze_repository_diff(root: &Path, git_ref: Option<&str>) -> Result<DiffAnalysisReport> {
     let root = root.canonicalize()?;
     let repo = String::from_utf8(git(&root, &["rev-parse", "--show-toplevel"])?)?;
@@ -727,6 +772,8 @@ pub fn analyze_repository_diff(root: &Path, git_ref: Option<&str>) -> Result<Dif
         }
     }
     let regressions = combined;
+    let baseline_regression_checks=baseline_checks(&base,&current,&ba,&ca,&snapshot.0,&root,&regressions);
+    let baseline_comparison_routes=current.routes.iter().filter(|r|base.routes.iter().any(|b|route_identity(&RouteReference::from(b),&ba)==route_identity(&RouteReference::from(*r),&ca))).count();
     for f in resolved_drifts
         .iter_mut()
         .chain(unverified_drifts.iter_mut())
@@ -762,6 +809,8 @@ pub fn analyze_repository_diff(root: &Path, git_ref: Option<&str>) -> Result<Dif
         affected_routes,
         newly_introduced_drifts,
         regressions,
+        baseline_regression_checks,
+        baseline_comparison_routes,
         unchanged_drifts,
         resolved_drifts,
         unverified_drifts,

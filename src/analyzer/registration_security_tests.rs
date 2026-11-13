@@ -2,6 +2,84 @@ use super::tests::TempRepo;
 use super::*;
 
 #[test]
+fn required_extension_helpers_preserve_the_producer_proof_boundary() {
+    for (name, body, expected) in [
+        ("bound", "let value = lookup(&req)?; Ok(())", true),
+        ("discarded-success", "lookup(&req)?; Ok(())", true),
+        ("ignored", "let value = lookup(&req); Ok(())", false),
+        ("optional", "let value = lookup(&req).ok(); Ok(())", false),
+        ("fallback", "let value = lookup(&req).unwrap_or_else(|_| Value{}); Ok(())", false),
+        ("conditional", "if condition() {lookup(&req)?;} Ok(())", false),
+        ("bypass", "if condition() {return Ok(());} let value=lookup(&req)?; Ok(())", false),
+        ("closure", "let work=|| {lookup(&req)?; Ok(())}; Ok(())", false),
+        ("deferred", "let work=async {lookup(&req)?; Ok(())}; Ok(())", false),
+        ("different-request", "let other=make_request(); let value=lookup(&other)?; Ok(())", false),
+        ("shadowed", "let req=make_request(); let value=lookup(&req)?; Ok(())", false),
+        ("reassigned", "req=make_request(); let value=lookup(&req)?; Ok(())", false),
+    ] {
+        let source=format!(r#"
+use actix_web::HttpRequest;
+struct Value {{}}
+fn lookup(request:&HttpRequest)->Result<Value,Error> {{request.extensions().get::<Value>().map(|v|v.to_owned()).ok_or_else(||denied())}}
+async fn endpoint(mut req:HttpRequest)->Result<(),Error> {{{body}}}
+fn app() {{App::new().route("/item",web::get().to(endpoint));}}
+"#);
+        let report=TempRepo::new(&format!("extension-consumption-{name}"),&[("main.rs",&source)]).analyze();
+        let requirements=&report.security_assessments[0].requirements;
+        let facts:Vec<_>=requirements.iter().filter(|r|r.mechanism=="required_request_extension").collect();
+        assert_eq!(facts.len(),usize::from(expected),"{name}: {requirements:?}");
+        assert!(facts.iter().all(|r|r.enforcement==security::Enforcement::Unresolved && r.explanation.contains("extension production")));
+        assert!(!requirements.iter().any(|r|r.dimension=="authentication" && r.enforcement==security::Enforcement::Observed),"{name}");
+        assert!(report.invariants.is_empty());
+        assert!(report.findings.is_empty());
+    }
+}
+
+#[test]
+fn required_extension_summary_requires_source_types_and_success_preservation() {
+    for (name, imports, helper, expected) in [
+        ("renamed", "use actix_web::HttpRequest as Incoming;", "fn lookup(r:&Incoming)->Result<Value,Error>{r.extensions().get::<Value>().map(|x|x.clone()).ok_or_else(||denied())}", true),
+        ("wrong-type", "struct Incoming;", "fn lookup(r:&Incoming)->Result<Value,Error>{r.extensions().get::<Value>().map(|x|x.clone()).ok_or_else(||denied())}", false),
+        ("replaced-value", "use actix_web::HttpRequest as Incoming;", "fn lookup(r:&Incoming)->Result<Value,Error>{r.extensions().get::<Value>().map(|x|Value{}).ok_or_else(||denied())}", false),
+        ("optional-return", "use actix_web::HttpRequest as Incoming;", "fn lookup(r:&Incoming)->Option<Value>{r.extensions().get::<Value>().map(|x|x.clone())}", false),
+        ("fake-result", "use actix_web::HttpRequest as Incoming; struct Result<T,E>(T,E);", "fn lookup(r:&Incoming)->Result<Value,Error>{r.extensions().get::<Value>().map(|x|x.clone()).ok_or_else(||denied())}", false),
+    ] {
+        let source=format!(r#"{imports}
+struct Value{{}}
+{helper}
+async fn endpoint(req:Incoming)->Result<(),Error>{{let value=lookup(&req)?;Ok(())}}
+fn app(){{App::new().route("/item",web::get().to(endpoint));}}
+"#);
+        let report=TempRepo::new(&format!("extension-source-{name}"),&[("main.rs",&source)]).analyze();
+        assert_eq!(report.security_assessments[0].requirements.iter().filter(|r|r.mechanism=="required_request_extension").count(),usize::from(expected),"{name}");
+    }
+}
+
+#[test]
+fn required_extension_helper_alias_retains_definition_provenance() {
+    let report=TempRepo::new("extension-definition-provenance",&[
+        ("main.rs", r#"
+mod values;
+use actix_web::HttpRequest;
+use crate::values::obtain as renamed;
+async fn endpoint(req:HttpRequest)->Result<(),Error>{let value=renamed(&req)?;Ok(())}
+fn app(){App::new().route("/item",web::get().to(endpoint));}
+"#),
+        ("values.rs", r#"
+use actix_web::HttpRequest;
+pub struct Value{}
+pub fn obtain(r:&HttpRequest)->Result<Value,Error>{r.extensions().get::<Value>().map(|v|v.clone()).ok_or_else(||denied())}
+"#),
+    ]).analyze();
+    let facts:Vec<_>=report.security_assessments[0].requirements.iter().filter(|r|r.mechanism=="required_request_extension").collect();
+    assert_eq!(facts.len(),1);
+    assert!(facts[0].explanation.contains("values.rs:4"));
+    assert!(facts[0].explanation.contains("values::obtain"));
+    assert!(facts[0].symbol.contains("renamed"));
+    assert_eq!(facts[0].enforcement,security::Enforcement::Unresolved);
+}
+
+#[test]
 fn conditional_result_aliases_and_renamed_field_guards_are_configuration_invariant() {
     for (name, macro_name, definition, extra, supported) in [
         (
@@ -651,6 +729,14 @@ pub fn acquire(raw: &str, key: &Key) -> Result<Principal,Error> {
         ("middleware-wrapper", "App::new().wrap(Gate::new()).configure(config);", identity.to_string(), "let person=acquire(raw,key).map_err(translate)?; req.extensions_mut().insert(person);", "Actor", true),
         ("generic-result-shadow", "App::new().wrap(Gate::new()).configure(config);", format!("{} pub type Verdict<Result> = Result; pub fn raw_principal(raw:&str,key:&Key)->Verdict<Principal> {{ let decoded=unpack::<Payload>(raw,key,&Rules::default())?; Principal(decoded.claims.sub) }} impl Principal {{pub fn map_err(self, f:Mapper)->Self {{Principal(forged())}}}} pub fn acquire(raw:&str,key:&Key)->Result<Principal,Error> {{Ok(raw_principal(raw,key).map_err(translate))}}", identity.replace("pub fn acquire", "fn prior")), "let person=acquire(raw,key)?; req.extensions_mut().insert(person);", "Actor", false),
         ("shadowed-result-constructor", "App::new().wrap(Gate::new()).configure(config);", format!("{} fn Ok(p:Principal)->Result<Principal,Error> {{Result::Ok(Principal(forged()))}}", identity), "let person=acquire(raw,key)?; req.extensions_mut().insert(person);", "Actor", false),
+        ("header", "App::new().wrap(Gate::new()).configure(config);", identity.to_string(), "let person=acquire(raw,key)?; req.extensions_mut().insert(person);", "Actor", true),
+        ("header-optional", "App::new().wrap(Gate::new()).configure(config);", identity.to_string(), "let person=acquire(raw,key)?; req.extensions_mut().insert(person);", "Option<Actor>", false),
+        ("header-unverified", "App::new().wrap(Gate::new()).configure(config);", identity.replace("let decoded=unpack::<Payload>(raw,key,&Rules::default())?;", "let decoded=unchecked(raw);"), "let person=acquire(raw,key)?; req.extensions_mut().insert(person);", "Actor", false),
+        ("header-refresh-fallthrough", "App::new().wrap(Gate::new()).configure(config);", identity.to_string(), "let person=match acquire(raw,key){Ok(p)=>p,Err(_)=>forged()}; req.extensions_mut().insert(person);", "Actor", false),
+        ("header-exempt", "App::new().wrap(Condition::new(enabled,Gate::new())).configure(config);", identity.to_string(), "let person=acquire(raw,key)?; req.extensions_mut().insert(person);", "Actor", false),
+        ("header-wrong-type", "App::new().wrap(Gate::new()).configure(config);", identity.to_string(), "let person=acquire(raw,key)?; req.extensions_mut().insert(Other(person));", "Actor", false),
+        ("header-ignored", "App::new().wrap(Gate::new()).configure(config);", identity.to_string(), "let person=acquire(raw,key); req.extensions_mut().insert(person);", "Actor", false),
+        ("header-permissive", "App::new().wrap(Gate::new()).configure(config);", identity.to_string(), "", "Actor", false),
     ] {
         let middleware = format!(
             r#"
@@ -664,6 +750,9 @@ impl<S> Service<ServiceRequest> for Carrier<S> {{
 }}
 "#
         );
+        let middleware = if name.starts_with("header") {
+            middleware.replace("req.cookie(\"session\").ok_or(denied())?.value()", "req.headers().get(\"X-Credential\").ok_or(denied())?.to_str()?")
+        } else { middleware };
         let middleware = if name=="service-future" {
             middleware.replace("Box::pin(async", "let svc=self.service.clone(); let context=self.context.clone(); Box::pin(async").replace("self.service.call(req).await", "let res=svc.call(req).await?; respond(res)")
         } else if name=="wrong-forward-context" {middleware.replace("self.service.call(req)","self.service.call(other)")} else {middleware};
@@ -968,7 +1057,8 @@ fn role_constructor_value_is_read_instead_of_assumed_from_its_name() {
         &[(
             "main.rs",
             r#"
-impl RoleGuard { fn admin() -> Self { Self { role: Role::Editor } } }
+struct RoleGuard { role: Role }
+impl RoleGuard { pub fn admin() -> Self { Self { role: Role::Editor } } }
 impl Service for RoleGuardMiddleware {
  fn call(&self, req: Request) { if req.role == self.role { self.service.call(req) } else { Err(denied()) } }
 }
@@ -1375,4 +1465,31 @@ fn app(c: &mut Config) { c.route("/item", web::get().to(handler).wrap(RequireAut
             .iter()
             .any(|r| r.dimension == "roles" && r.enforcement == security::Enforcement::Observed)
     );
+}
+
+
+#[test]
+fn middleware_policy_is_bound_to_the_called_source_constructor() {
+    for (name,body,expected) in [
+        ("member", "Self { role: Role::Reader }",Some("Role::Reader")),
+        ("unusual", "Self { role: Role::Editor }",Some("Role::Editor")),
+        ("conditional", "if condition() {Self {role:Role::Reader}} else {Self {role:Role::Admin}}",None),
+        ("opaque", "Self {role:choose()}",None),
+        ("uncanonicalized", "Self {role:Alias::Reader}",None),
+        ("early", "if condition(){return Self {role:Role::Admin};} Self {role:Role::Reader}",None),
+        ("ignored", "let unused=Self {role:Role::Admin}; factory()",None),
+    ] {
+        let source=format!(r#"
+struct RoleGuard {{role:Role}}
+impl RoleGuard {{pub fn admin()->Self {{Self {{role:Role::Admin}}}} pub fn {name}()->Self {{{body}}}}}
+impl Service for RoleGuardMiddleware {{fn call(&self,req:Request) {{if req.role==self.role {{self.service.call(req)}} else {{Err(denied())}}}}}}
+async fn handler() {{}}
+fn app(c:&mut Config) {{c.route("/other",web::get().to(handler).wrap(RoleGuard::admin())).route("/item",web::get().to(handler).wrap(RoleGuard::{name}()));}}
+"#);
+        let report=TempRepo::new("called-constructor-policy",&[("main.rs",&source)]).analyze();
+        let assessment=report.security_assessments.iter().find(|a|a.route.path=="/item").unwrap();
+        let observed:Vec<_>=assessment.requirements.iter().filter(|r|r.dimension=="roles" && r.enforcement==security::Enforcement::Observed).collect();
+        if let Some(policy)=expected {assert_eq!(observed.len(),1,"{name}");assert_eq!(observed[0].values,[policy]);}
+        else {assert!(observed.is_empty(),"{name}: {observed:?}");assert!(matches!(report.routes.iter().find(|r|r.path=="/item").unwrap().security_status(),RouteSecurityStatus::Unknown{..}));}
+    }
 }

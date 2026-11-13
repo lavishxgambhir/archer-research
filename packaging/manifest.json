@@ -1,0 +1,1124 @@
+{
+  "source_of_truth": "Current best-performing research working tree, including relevant uncommitted API changes; never the simplified Core edition",
+  "original_git": {
+    "branch": "codex/archer-research-snapshot",
+    "head": "dc892c776c4a0d8e2f640447d40bdc1838188bab"
+  },
+  "production_rust_unchanged": true,
+  "cargo_and_openapi_unchanged": true,
+  "no_project_git_mutations": true,
+  "required_fixture_exceptions": [
+    "demo/src/main.rs is embedded at compile time by src/analyzer/reporting.rs tests",
+    "demo/render_real_arg.py supplies graph_check to retained graph acceptance/escaping scripts",
+    "src/analyzer/legacy.rs and all existing Rust test modules remain test-only regression dependencies"
+  ],
+  "excluded_directory_rules": {
+    ".git/": "Original Git metadata/history is preserved outside this source edition",
+    "target/ and demo/target/": "All generated build/test artifacts moved to separate archer-research-verification/build-target",
+    "research/ and evidence/": "Research-only scripts/datasets/archives/history are not needed for backend compilation or essential tests",
+    "demonstration-output/": "Previously generated analysis/graph artifacts are not runtime inputs",
+    "__pycache__/ and .venv/": "Local caches and optional developer environments are not source dependencies"
+  },
+  "original_files": [
+    {
+      "path": ".DS_Store",
+      "bytes": 6148,
+      "sha256": "8a2339c40d00c7cc840980ff19b01dbd372ed5f2788e92618f0d521db79f3316",
+      "action": "excluded",
+      "reason": "Excluded machine metadata"
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 73,
+      "sha256": "a0ddec32afea23acb0f8f6fe990e5f23a33baf628e6a0e66dba4bccedfd6ac79",
+      "action": "replaced_documentation_or_config",
+      "reason": "Replaced/refocused deployment and integration documentation/configuration; original preserved"
+    },
+    {
+      "path": "archer-graph.dot",
+      "bytes": 12557,
+      "sha256": "64215dd71d24f24cae433d9381bf2eb44928090461bafb2a79dbe89006ce6ad3",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "archer-review.patch",
+      "bytes": 966,
+      "sha256": "511f1ba52e1e1d0f4e459cc0c66a90f4f6797d6a81a6c23458a5aa6aff2c509d",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "Archer_Context.md",
+      "bytes": 7965,
+      "sha256": "e67e2e8f551a2cd24b03b9d4d39f95ed826608cdad460e3af29df3f239107de1",
+      "action": "excluded",
+      "reason": "Excluded development context; not referenced by retained build/runtime/tests"
+    },
+    {
+      "path": "Cargo.lock",
+      "bytes": 35450,
+      "sha256": "80c60b3306f5c1da38e7755fa236331bc3b0b1130d85529c8f744bb476215cca",
+      "action": "retained_unchanged",
+      "reason": "Locked, independently buildable Cargo dependency closure"
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 1420,
+      "sha256": "3709feeaa63e5ad7d516f9ae7500c293a0de884874253dd46b39abc16f1c6315",
+      "action": "retained_unchanged",
+      "reason": "Locked, independently buildable Cargo dependency closure"
+    },
+    {
+      "path": "README.md",
+      "bytes": 12119,
+      "sha256": "45ea0146a9e633a3f0d526e0aebe9d711e9bc9ed6b8700ed4b7661a4894b65ad",
+      "action": "replaced_documentation_or_config",
+      "reason": "Replaced/refocused deployment and integration documentation/configuration; original preserved"
+    },
+    {
+      "path": "demo/Cargo.lock",
+      "bytes": 36994,
+      "sha256": "fb57876663a433885bb36b1531c7ea6bb25cb2707f2ab03a3befadce183215b9",
+      "action": "retained_unchanged",
+      "reason": "Self-contained optional executable demo/diff verification dependency closure"
+    },
+    {
+      "path": "demo/Cargo.toml",
+      "bytes": 161,
+      "sha256": "f80dcbcd231c3cb3c817f52f28f68ad2877cf43571040ae9a2aa3cf3743e7bd7",
+      "action": "retained_unchanged",
+      "reason": "Self-contained optional executable demo/diff verification dependency closure"
+    },
+    {
+      "path": "demo/render_real_arg.py",
+      "bytes": 11931,
+      "sha256": "7b3398399dae5450b3fe737afded985433ed1a6bcd9eaf2313f2bf7f2947f379",
+      "action": "retained_unchanged",
+      "reason": "Essential graph topology/escaping test helpers; not runtime rendering dependencies"
+    },
+    {
+      "path": "demo/reproduce.py",
+      "bytes": 3983,
+      "sha256": "6d3d2c23de67c0720a83cdf1fb9a9f962b57ff27fe981b63b7625ac291165970",
+      "action": "retained_unchanged",
+      "reason": "Self-contained optional executable demo/diff verification dependency closure"
+    },
+    {
+      "path": "demo/verify_arg_labels.py",
+      "bytes": 2672,
+      "sha256": "56671c456bc03e5d899e3367bb30a72cef9f8463ab5971d976121cab9a7f45a9",
+      "action": "retained_unchanged",
+      "reason": "Essential graph topology/escaping test helpers; not runtime rendering dependencies"
+    },
+    {
+      "path": "demo/src/main.rs",
+      "bytes": 5385,
+      "sha256": "ffd3f834278d18843df7bf4b399e69e48726a60508a80dbd29be5c121c16fdec",
+      "action": "retained_unchanged",
+      "reason": "Essential compile-time include_str fixture and existing clean/mutated API test source"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113/actual.dot",
+      "bytes": 37166,
+      "sha256": "b6e101195b5850b3a9d231c7a2e2e31ad7a1e3a7ea0716c2f315c268e06f4b3e",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113/actual.graphviz.json",
+      "bytes": 126103,
+      "sha256": "559ccaf994d0e86062de4c61c0684ef96e09376512bbe0c998b0df28ede53716",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113/actual.graphviz.png",
+      "bytes": 273315,
+      "sha256": "09a59d85f3e62b257da806ed7ab04294f5f1e84bfe28f6187f4e8bd74fb1f482",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113/actual.graphviz.svg",
+      "bytes": 115864,
+      "sha256": "ffc3f4810ad1e5180e7d419ba6cc33ed85d45ba186d83e78d342f06f825f4631",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113/actual.json",
+      "bytes": 184971,
+      "sha256": "7c1a6219a72399479988938da2f034247700bfb41bd6e520a0cf59571bdcc207",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/actual-to-frozen-baseline.patch",
+      "bytes": 2604,
+      "sha256": "482110a5a6fbea97b9b2f41a83104d1cb3f49062d2c2c157f56bca023eb8562d",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/actual.dot",
+      "bytes": 37166,
+      "sha256": "b6e101195b5850b3a9d231c7a2e2e31ad7a1e3a7ea0716c2f315c268e06f4b3e",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/actual.graphviz.json",
+      "bytes": 126103,
+      "sha256": "559ccaf994d0e86062de4c61c0684ef96e09376512bbe0c998b0df28ede53716",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/actual.graphviz.png",
+      "bytes": 273315,
+      "sha256": "09a59d85f3e62b257da806ed7ab04294f5f1e84bfe28f6187f4e8bd74fb1f482",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/actual.graphviz.svg",
+      "bytes": 115864,
+      "sha256": "ffc3f4810ad1e5180e7d419ba6cc33ed85d45ba186d83e78d342f06f825f4631",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/actual.json",
+      "bytes": 184971,
+      "sha256": "7c1a6219a72399479988938da2f034247700bfb41bd6e520a0cf59571bdcc207",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/actual.provenance.json",
+      "bytes": 25263,
+      "sha256": "7302d927399b2a1c5d578f36dec62b0962db128e02b40e3fb5a53eca7586023e",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/clean.dot",
+      "bytes": 44702,
+      "sha256": "8229cdd868828bbc6f1227a067194b71fa51c31fbc9cd50d80970669659d788e",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/clean.graphviz.json",
+      "bytes": 129805,
+      "sha256": "fd3e81b276960136b4a7b895081bb2223dc9fb0a1d69905b35a244c28dea375d",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/clean.graphviz.png",
+      "bytes": 273578,
+      "sha256": "bd70e7de849da8ab238d46b1d616e4484d03a007a59fd1cb29a85fda006c69df",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/clean.graphviz.svg",
+      "bytes": 129719,
+      "sha256": "b7390828aac509811c6b27863d6a4a1de0dff4a487153264818231ccfda2ae64",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/clean.json",
+      "bytes": 206937,
+      "sha256": "a5c51663c9c96ecfc5e8e0a5c82b8aaa61e1b53da7146355353cb25da971c8bc",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/clean.provenance.json",
+      "bytes": 29310,
+      "sha256": "961a8f171ec2248b096881cb3894c54e54f8468041f5afc302a7ce130a021c17",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/graph-delta.json",
+      "bytes": 8059,
+      "sha256": "28880f03fe66f9c34b896315d64d33d0b82565f03aa1c4fc0d22863273c58c02",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/manifest.json",
+      "bytes": 20872,
+      "sha256": "50e4cc5586f76d94ba3db80e4444ec823c5b7e84c0a2ce6dcb66574f264548c0",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/mutated.dot",
+      "bytes": 46104,
+      "sha256": "2e5abb1e9caa2767e19d00984003a407ca72a3d35982e0f7bcf37a3e1b495ea2",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/mutated.graphviz.json",
+      "bytes": 137738,
+      "sha256": "c4c3514f63ac60fc84403b2187e26501707d9219ddff91fe7fa29bb10a59ec3c",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/mutated.graphviz.png",
+      "bytes": 333948,
+      "sha256": "d1c3ea6cc915ad761ed435cf635ad2cc9754a71245c3c4344726aad36b5ba27a",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/mutated.graphviz.svg",
+      "bytes": 135281,
+      "sha256": "dc54f57c9ac0ffcbae0ab999998b36ade0be6ebb4bad321977bdb2be3f1b8dc1",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/mutated.json",
+      "bytes": 213284,
+      "sha256": "455c01cf27c76ed73b7f36245cfd29a1f8db313e5fb6ab47d2582ea51447652c",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/mutated.provenance.json",
+      "bytes": 29948,
+      "sha256": "51907d01f39e522887fb0bb079fee4658bb48d08328bea38858a8512a1664daf",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/mutation.patch",
+      "bytes": 2360,
+      "sha256": "691b9940f43ee6d5d83fa571c26aa3abf504d889d9f8066611151ac21af1cde7",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/verification-summary.json",
+      "bytes": 2051,
+      "sha256": "64d36937f8d56b4b6c1461ef3d92871a03c0e8dea123195cb26d594b56e32380",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/label-regression/fixture/Cargo.toml",
+      "bytes": 73,
+      "sha256": "3e2eebef7cc2fe9f92540e39896f1dfb166ac4901661f3ddee069acc6fe98cb9",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/label-regression/fixture/src/main.rs",
+      "bytes": 370,
+      "sha256": "b1162a68cb2c2efad034f447d31dcb35b969cf3aacb462963caa75c0dc00af9e",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/label-regression-verified/labels.dot",
+      "bytes": 9313,
+      "sha256": "58e97df17aca2b55ec5ba7be1f5e0572068cd7f4c9519ade12003ee5f3517114",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/label-regression-verified/labels.json",
+      "bytes": 25220,
+      "sha256": "a54dfd73904df915f7204820f4ab0cd37a7b812f6bdcc505a50e0d1e968e5ef6",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/label-regression-verified/labels.png",
+      "bytes": 45692,
+      "sha256": "e06717b10ece7a5df0c2ba259a7ed64db8da131cec6229ad133c9b51b64b0f6e",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/label-regression-verified/labels.svg",
+      "bytes": 27010,
+      "sha256": "c30e8bd6e54f117044b092c78f03fd945ffbb8673adcfb3d3f914133a9e1ac39",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/label-regression-verified/report.json",
+      "bytes": 25970,
+      "sha256": "43af620e95d51ddeffe37c17739b99ee9368e57892802aec67c7b52f7fab02a9",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/label-regression-verified/fixture/Cargo.toml",
+      "bytes": 73,
+      "sha256": "3e2eebef7cc2fe9f92540e39896f1dfb166ac4901661f3ddee069acc6fe98cb9",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "demonstration-output/seaorm-arg-20261113-verified/label-regression-verified/fixture/src/main.rs",
+      "bytes": 392,
+      "sha256": "e4a437a7a0683a3e36b5b17d25e6f8528ebf5af059006c220b893d160197db17",
+      "action": "excluded",
+      "reason": "Excluded previously generated reports/graphs/review artifacts; dynamically regenerated per job"
+    },
+    {
+      "path": "docs/arg-visualization.md",
+      "bytes": 20808,
+      "sha256": "1866760f64b1571a744d5474c90bf099610f8819263c5ca09db00931dfeb9886",
+      "action": "replaced_documentation_or_config",
+      "reason": "Replaced/refocused deployment and integration documentation/configuration; original preserved"
+    },
+    {
+      "path": "docs/backend.md",
+      "bytes": 16199,
+      "sha256": "220f903a20e8cbd2cadf1769e54a693ba3c5beff3d55eb51af323ad19c96703a",
+      "action": "replaced_documentation_or_config",
+      "reason": "Replaced/refocused deployment and integration documentation/configuration; original preserved"
+    },
+    {
+      "path": "docs/development-log.md",
+      "bytes": 6577,
+      "sha256": "93b3bea6952df8e09e027884860ee9a6560908ec9fa4c60a0cd0d69b0c348c9d",
+      "action": "excluded",
+      "reason": "Excluded historical development/evaluation/checkpoint documentation"
+    },
+    {
+      "path": "docs/openapi.json",
+      "bytes": 54129,
+      "sha256": "3901e5b39e86673d803940394af8a8396aec9ac607345fbb83c281448932ddf2",
+      "action": "retained_unchanged",
+      "reason": "Existing machine-readable API contract, byte-identical"
+    },
+    {
+      "path": "docs/checkpoints/checkpoint-01-prototype.md",
+      "bytes": 1436,
+      "sha256": "47185dc13e4254ed4d01c1a10aa3270a2dbaa8d2211f19f1363d843adc297530",
+      "action": "excluded",
+      "reason": "Excluded historical development/evaluation/checkpoint documentation"
+    },
+    {
+      "path": "docs/checkpoints/checkpoint-02-authorization-evidence.md",
+      "bytes": 2882,
+      "sha256": "b3e3681c9af224108a02c62a7a1936d973b56aafb038a7476dbd2e62a6d6bc30",
+      "action": "excluded",
+      "reason": "Excluded historical development/evaluation/checkpoint documentation"
+    },
+    {
+      "path": "docs/checkpoints/checkpoint-03-benchmark-evaluation.md",
+      "bytes": 2604,
+      "sha256": "01119afbdb6aa30f6cb9bc550599d4a2b3b504eeb70d43e596ac969aee4d9910",
+      "action": "excluded",
+      "reason": "Excluded historical development/evaluation/checkpoint documentation"
+    },
+    {
+      "path": "docs/evaluation/benchmark-results.md",
+      "bytes": 3017,
+      "sha256": "9a89023e164fbe54bc8c86a080467be523c0eb4a043da105208a5aee59e71f32",
+      "action": "excluded",
+      "reason": "Excluded historical development/evaluation/checkpoint documentation"
+    },
+    {
+      "path": "evidence/archer-evaluation-2026-11-07.zip",
+      "bytes": 14432747,
+      "sha256": "2f5c4f2bf689b94c018faaa1a153b70f1cc29e1a9f70f5e078c8d43fe45acd2b",
+      "action": "excluded",
+      "reason": "Excluded archived research evidence; original files preserved"
+    },
+    {
+      "path": "evidence/MANIFEST.json",
+      "bytes": 374757,
+      "sha256": "9ae49e752c86c5a1c81044b0ea6ffce9530ddfcc64dee517f58842c503a41a65",
+      "action": "excluded",
+      "reason": "Excluded archived research evidence; original files preserved"
+    },
+    {
+      "path": "evidence/README.md",
+      "bytes": 912,
+      "sha256": "88b5bef5aad542512a8ca589ebec55e353d4411ecce0f65531b9c703b5a706ba",
+      "action": "excluded",
+      "reason": "Excluded archived research evidence; original files preserved"
+    },
+    {
+      "path": "research/actix-gap-analysis.md",
+      "bytes": 12564,
+      "sha256": "d54d8dcb58736ea96ed7a92e4826370fcbe922205a5eb8a6ac81b24766337c5f",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/audit_peer_promotion.py",
+      "bytes": 4996,
+      "sha256": "6e73ab6957d3bd454d5b4c517529fbecf5b7c78ea3890464714f1522a122a433",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/evaluate.py",
+      "bytes": 18519,
+      "sha256": "d899f95b7db27281c5d0f980943bc9442c3ab82be1b4e0f5973ba597b6d97455",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/ground-truth.json",
+      "bytes": 14998,
+      "sha256": "cfcee78e583712e2318ff97a4906fa398903dcc92463818e83f83b3a129bba58",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/header-auth-provenance.md",
+      "bytes": 4163,
+      "sha256": "2032dc56c3f7c4529bf447fe34d9cd11272b537935d5d0fe0c2e3b755026cb65",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/macro-route-discovery-phase4.md",
+      "bytes": 8180,
+      "sha256": "a5af2bbae03932b8c882bfdc1f08ee90644978c23ab1eb010d9ec2ad22db8196",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/measure_resource_traversal.py",
+      "bytes": 2145,
+      "sha256": "a72e036de376d024fa925bcf4c6decdd908fa4de42cdeb18d0e8232f164b8b07",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/measure_review_comparisons.py",
+      "bytes": 3263,
+      "sha256": "ec167af1a19193d19f62f315eb8de8c6fabadab61086ecce66bd40cfce5383f4",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/middleware-auth-feasibility.md",
+      "bytes": 4993,
+      "sha256": "00ab0b189a2015407995a9546038f8286d7fc6a4f2abd6c253a8cce7aea0e939",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/peer-promotion-audit.md",
+      "bytes": 7462,
+      "sha256": "0f54a316a35a4000b94ddd003bc5efaf464092821a1e4ee57254f7f263809f23",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/peer-recall.md",
+      "bytes": 10622,
+      "sha256": "624e29598f62e6df60949170358ec2045c48d8234a94ff6d508d306179c4f589",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/phase2-complementary-detections.md",
+      "bytes": 5883,
+      "sha256": "2731442b2ca1486f8ec34278431332aaf51596b865ef6738081231b9be9e89ba",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/phase3-security-review.md",
+      "bytes": 6179,
+      "sha256": "b4f84545054667a493caa431bd34ad3695adcf5c53e7ec49c69fee5f6aad5104",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/phase3b-peer-discovery.md",
+      "bytes": 4787,
+      "sha256": "27dda77e9f056fecc58166b55ab3f2366ed3c6d7994dfe10d9176a12a3158354",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/phase5-practical-integration.md",
+      "bytes": 14568,
+      "sha256": "99fe6148bea2842573c9e901e1f69ef3ccef6336e7401d5c3fea258a4ab7ec61",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/README.md",
+      "bytes": 43286,
+      "sha256": "5cb11a437ac2ca83aefaf647e3625472784cb1b66cf1a5297452304b2b113f95",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/requirement-uncertainty-phase1.md",
+      "bytes": 5730,
+      "sha256": "0f84c98d5eafa8de578c722ad2b4e12c7317330b5d95bd16291f8bd1a2766ef5",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/resource-provenance-correction.md",
+      "bytes": 8272,
+      "sha256": "d5b401ca7d1cdc95d7b5a1dc4735b55370b1864f6cfcf971c2bf0f6c179e8a7a",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/second-application-attempt.md",
+      "bytes": 5190,
+      "sha256": "93ce48aca3abf617a129c8984fe89b126dbdf6dad95571c4bbd9f8ee5343679f",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/source-understanding-labels.json",
+      "bytes": 35073,
+      "sha256": "51895af2e738aaab72cbe79b1904b65c9ff7b1954303decc8a65bae1f3a424fa",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/test_evaluate.py",
+      "bytes": 3675,
+      "sha256": "5304e862cbd2573ce3cabe4b9f0a90d9d0607967600a6d1eb4aa73a130ecef4c",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/verify_actix_gaps.py",
+      "bytes": 5693,
+      "sha256": "122a9b7602c09503d34cd56b8a425305acf8067b0b0b9895d2ab8ae1655f2792",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/verify_exploratory_comparisons.py",
+      "bytes": 2778,
+      "sha256": "69d8de3d345e68130da0bf2ca9d3f493a3cc9bbf890375cdb153944800989ae6",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "research/verify_requirement_uncertainty.py",
+      "bytes": 8045,
+      "sha256": "ca064253da0085a92d138903a62606820346131fa2c53810c8e20e6d2860ae86",
+      "action": "excluded",
+      "reason": "Excluded research-only evaluation/scripts/history; not a backend build/runtime or essential test dependency"
+    },
+    {
+      "path": "src/analyzer.rs",
+      "bytes": 132987,
+      "sha256": "a746a9aebf62a6f5a4a9b7470ff3b26d663c59904512b16ed550bce2ba56cee4",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/lib.rs",
+      "bytes": 127,
+      "sha256": "1254893dae71bfaa7df784df02c6e301138a0e6bb365034d44d2b82c8748f0de",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/main.rs",
+      "bytes": 14217,
+      "sha256": "2e194708555fc1ce6eca409c7fbf4e27c14f15c33af763c5c1ae6699aec8b40d",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/analyzer/legacy.rs",
+      "bytes": 13260,
+      "sha256": "381805d902acd5740cdc6c21360144eb5ae80b6e05e1ff5111f74fa5d234f79f",
+      "action": "retained_unchanged",
+      "reason": "Essential Rust regression tests/helpers; legacy compiled only with cfg(test)"
+    },
+    {
+      "path": "src/analyzer/policy_drift.rs",
+      "bytes": 108161,
+      "sha256": "0280753efe65499ebf5bf6ae97f5a19b191595c2cbeceadc2d76a249ee9611af",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/analyzer/policy_drift_tests.rs",
+      "bytes": 90802,
+      "sha256": "be7f391045f4b3a11a4134e995bb5b5965ddf1652887ab14728b16548a889b01",
+      "action": "retained_unchanged",
+      "reason": "Essential Rust regression tests/helpers; legacy compiled only with cfg(test)"
+    },
+    {
+      "path": "src/analyzer/registration.rs",
+      "bytes": 14532,
+      "sha256": "053393bc72fc45de4ceb413ed8704172beac55ecf53db577a02e5d71b6088bfb",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/analyzer/registration_security_tests.rs",
+      "bytes": 63769,
+      "sha256": "db3f21d2d09d87bf2ad2d31b54baba5b08259cd64af185c2047cbe85428ed956",
+      "action": "retained_unchanged",
+      "reason": "Essential Rust regression tests/helpers; legacy compiled only with cfg(test)"
+    },
+    {
+      "path": "src/analyzer/reporting.rs",
+      "bytes": 43951,
+      "sha256": "527e5d75f4541b5bf96a805fdf13656ace7218412c11006e941f21e6514f7ac6",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/analyzer/security.rs",
+      "bytes": 118547,
+      "sha256": "1d20976b55ec297f2bdad9d1aa34080268bf3281872ce16ebb922c9925186d5f",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/analyzer/tests.rs",
+      "bytes": 94798,
+      "sha256": "8b542d7af7cca4b16819632aed76c7388ea837f72d1bf5fe7e7acc88ce487a69",
+      "action": "retained_unchanged",
+      "reason": "Essential Rust regression tests/helpers; legacy compiled only with cfg(test)"
+    },
+    {
+      "path": "src/api/config.rs",
+      "bytes": 8864,
+      "sha256": "0fc69d2fb25410cfea70e528714a140ad18090240aaf3c10d3eb5ee31562b017",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/contracts.rs",
+      "bytes": 3351,
+      "sha256": "1c47b9bafe6727449a492d3b15238ea48f32e9b7f592bd39f7ce5d607a394fc9",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/explanation.rs",
+      "bytes": 1078,
+      "sha256": "9ae6e75c242dd9132c5207d39af3cc2ccd227e30b5170f72711f9e580608b8fc",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/http.rs",
+      "bytes": 17219,
+      "sha256": "593a96c935d9d0d4f31fe829f90a5696b656b3a7bb24c1b14e381cf7209dd0c0",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/limits.rs",
+      "bytes": 4706,
+      "sha256": "22fcba81c8f0648912d30e331641c0e54567f99fce44bfea30b8ca110d297747",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/mod.rs",
+      "bytes": 279,
+      "sha256": "21523b8b3d35ee132a65cabc14f2b544bd39a51ec6778e2333096ec250052a6f",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/openapi.rs",
+      "bytes": 19366,
+      "sha256": "b2dd459ad5426088e1e86e93a179a5e0ed31b49eaaef1e0053f4028c6366fbb2",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/privacy.rs",
+      "bytes": 5795,
+      "sha256": "dae02ce93dcd60f0aad53f2eecbd7af432e576b4f6d885ff3748c3ff28925988",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/sources.rs",
+      "bytes": 20817,
+      "sha256": "e587be0fbca94475518916bbbb1f2a8314670538a21130dc6af3c5bade1f2fe8",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/tests.rs",
+      "bytes": 7543,
+      "sha256": "5f96b1f6e69d727a5d4b3e3e58590d3d38af52e72b79ff0fb5e727b9cee49b20",
+      "action": "retained_unchanged",
+      "reason": "Essential Rust regression tests/helpers; legacy compiled only with cfg(test)"
+    },
+    {
+      "path": "src/api/worker.rs",
+      "bytes": 12053,
+      "sha256": "00b20894b7c5bc570ec2c52dbac66ab97993595960e61af9fdc25531c9dd3206",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/bin/archer-api.rs",
+      "bytes": 611,
+      "sha256": "a6bafd8f273bec39986154b15a8aeb5bca2a5a4afa94ee0c5631dca197dc6337",
+      "action": "retained_unchanged",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "tests/.DS_Store",
+      "bytes": 6148,
+      "sha256": "530d15922608c86fc16eea7cb11484de57b08df17197ff341eff7203030b4418",
+      "action": "excluded",
+      "reason": "Excluded machine metadata"
+    },
+    {
+      "path": "tests/api_contract.rs",
+      "bytes": 15371,
+      "sha256": "30be82954115ea18baea126a855fa190be5b97809820a001d21cfa72cc68e513",
+      "action": "retained_unchanged",
+      "reason": "Existing API integration or new dynamic graph/GitHub acceptance tests"
+    },
+    {
+      "path": "tests/verify_api_openapi.py",
+      "bytes": 11133,
+      "sha256": "d12a4429571a752e08177396e4adf7764d7a8d527ff2909be2d8210ba442b026",
+      "action": "retained_unchanged",
+      "reason": "Existing API integration or new dynamic graph/GitHub acceptance tests"
+    },
+    {
+      "path": "tests/fixtures/demo.rs",
+      "bytes": 630,
+      "sha256": "64d65c9b30cd4cc56b85cf54dc7fa67e88d19dd088a6d961b2327399e754896f",
+      "action": "excluded",
+      "reason": "Excluded unused fixture; no include/read references from retained build/tests (actual embedded fixture is demo/src/main.rs)"
+    }
+  ],
+  "packaged_files": [
+    {
+      "path": ".env.example",
+      "sha256": "e9d8aaacdad25456f4f85e5bea7a92e9626fbb42f34d79c365d521fa43e3bb4b",
+      "origin": "generated packaging/test/documentation file",
+      "reason": "Portable deployment configuration, frontend contract, fresh acceptance test or packaging audit metadata"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "01ce4753ec41321dbe7f928bdfe6434d39d96ee54640068c2c2e043944dd4ebb",
+      "origin": "current research working tree",
+      "reason": "Replaced/refocused deployment and integration documentation/configuration; original preserved"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "80c60b3306f5c1da38e7755fa236331bc3b0b1130d85529c8f744bb476215cca",
+      "origin": "current research working tree",
+      "reason": "Locked, independently buildable Cargo dependency closure"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "3709feeaa63e5ad7d516f9ae7500c293a0de884874253dd46b39abc16f1c6315",
+      "origin": "current research working tree",
+      "reason": "Locked, independently buildable Cargo dependency closure"
+    },
+    {
+      "path": "demo/Cargo.lock",
+      "sha256": "fb57876663a433885bb36b1531c7ea6bb25cb2707f2ab03a3befadce183215b9",
+      "origin": "current research working tree",
+      "reason": "Self-contained optional executable demo/diff verification dependency closure"
+    },
+    {
+      "path": "demo/Cargo.toml",
+      "sha256": "f80dcbcd231c3cb3c817f52f28f68ad2877cf43571040ae9a2aa3cf3743e7bd7",
+      "origin": "current research working tree",
+      "reason": "Self-contained optional executable demo/diff verification dependency closure"
+    },
+    {
+      "path": "demo/render_real_arg.py",
+      "sha256": "7b3398399dae5450b3fe737afded985433ed1a6bcd9eaf2313f2bf7f2947f379",
+      "origin": "current research working tree",
+      "reason": "Essential graph topology/escaping test helpers; not runtime rendering dependencies"
+    },
+    {
+      "path": "demo/reproduce.py",
+      "sha256": "6d3d2c23de67c0720a83cdf1fb9a9f962b57ff27fe981b63b7625ac291165970",
+      "origin": "current research working tree",
+      "reason": "Self-contained optional executable demo/diff verification dependency closure"
+    },
+    {
+      "path": "demo/src/main.rs",
+      "sha256": "ffd3f834278d18843df7bf4b399e69e48726a60508a80dbd29be5c121c16fdec",
+      "origin": "current research working tree",
+      "reason": "Essential compile-time include_str fixture and existing clean/mutated API test source"
+    },
+    {
+      "path": "demo/verify_arg_labels.py",
+      "sha256": "56671c456bc03e5d899e3367bb30a72cef9f8463ab5971d976121cab9a7f45a9",
+      "origin": "current research working tree",
+      "reason": "Essential graph topology/escaping test helpers; not runtime rendering dependencies"
+    },
+    {
+      "path": "deploy/archer-api.service",
+      "sha256": "edffc63ec2ab95c4a4305bc2fc4739ac7ee64558d3ea3ccea608cecd532b0de4",
+      "origin": "generated packaging/test/documentation file",
+      "reason": "Portable deployment configuration, frontend contract, fresh acceptance test or packaging audit metadata"
+    },
+    {
+      "path": "docs/arg-visualization.md",
+      "sha256": "9733a7d2f995c17ad98db1e8035ec01fa6e003d5b0f28eebffa3bd9b6f916906",
+      "origin": "current research working tree",
+      "reason": "Replaced/refocused deployment and integration documentation/configuration; original preserved"
+    },
+    {
+      "path": "docs/backend.md",
+      "sha256": "edfe6d9e2a285a9ef0dd0e5cf152d62ae941e7cf44f146aaec8effc7fa0a903e",
+      "origin": "current research working tree",
+      "reason": "Replaced/refocused deployment and integration documentation/configuration; original preserved"
+    },
+    {
+      "path": "docs/deployment.md",
+      "sha256": "e1b8c0b447e69e6563a40edfa26367a20b2a04fd20147ab475179edf50c62eb8",
+      "origin": "generated packaging/test/documentation file",
+      "reason": "Portable deployment configuration, frontend contract, fresh acceptance test or packaging audit metadata"
+    },
+    {
+      "path": "docs/frontend-integration.md",
+      "sha256": "a027dd50dc18daf21540e72325b2c01a2e0cbc338273b26ac701da3592c76acb",
+      "origin": "generated packaging/test/documentation file",
+      "reason": "Portable deployment configuration, frontend contract, fresh acceptance test or packaging audit metadata"
+    },
+    {
+      "path": "docs/openapi.json",
+      "sha256": "3901e5b39e86673d803940394af8a8396aec9ac607345fbb83c281448932ddf2",
+      "origin": "current research working tree",
+      "reason": "Existing machine-readable API contract, byte-identical"
+    },
+    {
+      "path": "packaging/manifest.json",
+      "sha256": null,
+      "origin": "generated packaging/test/documentation file",
+      "reason": "Self-measuring metadata; hashes supplied by the final source archive checksum"
+    },
+    {
+      "path": "packaging/READINESS.md",
+      "sha256": "e2317b383b761d0e91586c73539d6d06f3e5b8924cb99d868745ea4f33ae6d5a",
+      "origin": "generated packaging/test/documentation file",
+      "reason": "Portable deployment configuration, frontend contract, fresh acceptance test or packaging audit metadata"
+    },
+    {
+      "path": "packaging/statistics.json",
+      "sha256": null,
+      "origin": "generated packaging/test/documentation file",
+      "reason": "Self-measuring metadata; hashes supplied by the final source archive checksum"
+    },
+    {
+      "path": "packaging/STATISTICS.md",
+      "sha256": null,
+      "origin": "generated packaging/test/documentation file",
+      "reason": "Self-measuring metadata; hashes supplied by the final source archive checksum"
+    },
+    {
+      "path": "packaging/VERIFICATION.md",
+      "sha256": "2045fd529e3095410e10ae76561982d0ab204058672f0af68f9482af1337fa32",
+      "origin": "generated packaging/test/documentation file",
+      "reason": "Portable deployment configuration, frontend contract, fresh acceptance test or packaging audit metadata"
+    },
+    {
+      "path": "README.md",
+      "sha256": "3843989949329f70b42af7fdf9cb59bdd6c7020e99553f2ef5b4a2685bbc3d20",
+      "origin": "current research working tree",
+      "reason": "Replaced/refocused deployment and integration documentation/configuration; original preserved"
+    },
+    {
+      "path": "requirements-dev.txt",
+      "sha256": "196a7f7d0378e1068894d46048ca93ed8367853ae3fd3c05ecbc5d4e79032658",
+      "origin": "generated packaging/test/documentation file",
+      "reason": "Portable deployment configuration, frontend contract, fresh acceptance test or packaging audit metadata"
+    },
+    {
+      "path": "scripts/run-api.ps1",
+      "sha256": "9f76ea013eb6b88d77f308502d70347316913dcf8f18e43ddb851e77990201f5",
+      "origin": "generated packaging/test/documentation file",
+      "reason": "Portable deployment configuration, frontend contract, fresh acceptance test or packaging audit metadata"
+    },
+    {
+      "path": "scripts/run-api.sh",
+      "sha256": "94e4b870da2c7e3bc9e10fa36895ff5ad5f0d1100376de47603482b5ed8432e9",
+      "origin": "generated packaging/test/documentation file",
+      "reason": "Portable deployment configuration, frontend contract, fresh acceptance test or packaging audit metadata"
+    },
+    {
+      "path": "src/analyzer/legacy.rs",
+      "sha256": "381805d902acd5740cdc6c21360144eb5ae80b6e05e1ff5111f74fa5d234f79f",
+      "origin": "current research working tree",
+      "reason": "Essential Rust regression tests/helpers; legacy compiled only with cfg(test)"
+    },
+    {
+      "path": "src/analyzer/policy_drift.rs",
+      "sha256": "0280753efe65499ebf5bf6ae97f5a19b191595c2cbeceadc2d76a249ee9611af",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/analyzer/policy_drift_tests.rs",
+      "sha256": "be7f391045f4b3a11a4134e995bb5b5965ddf1652887ab14728b16548a889b01",
+      "origin": "current research working tree",
+      "reason": "Essential Rust regression tests/helpers; legacy compiled only with cfg(test)"
+    },
+    {
+      "path": "src/analyzer/registration.rs",
+      "sha256": "053393bc72fc45de4ceb413ed8704172beac55ecf53db577a02e5d71b6088bfb",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/analyzer/registration_security_tests.rs",
+      "sha256": "db3f21d2d09d87bf2ad2d31b54baba5b08259cd64af185c2047cbe85428ed956",
+      "origin": "current research working tree",
+      "reason": "Essential Rust regression tests/helpers; legacy compiled only with cfg(test)"
+    },
+    {
+      "path": "src/analyzer/reporting.rs",
+      "sha256": "527e5d75f4541b5bf96a805fdf13656ace7218412c11006e941f21e6514f7ac6",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/analyzer/security.rs",
+      "sha256": "1d20976b55ec297f2bdad9d1aa34080268bf3281872ce16ebb922c9925186d5f",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/analyzer/tests.rs",
+      "sha256": "8b542d7af7cca4b16819632aed76c7388ea837f72d1bf5fe7e7acc88ce487a69",
+      "origin": "current research working tree",
+      "reason": "Essential Rust regression tests/helpers; legacy compiled only with cfg(test)"
+    },
+    {
+      "path": "src/analyzer.rs",
+      "sha256": "a746a9aebf62a6f5a4a9b7470ff3b26d663c59904512b16ed550bce2ba56cee4",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/config.rs",
+      "sha256": "0fc69d2fb25410cfea70e528714a140ad18090240aaf3c10d3eb5ee31562b017",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/contracts.rs",
+      "sha256": "1c47b9bafe6727449a492d3b15238ea48f32e9b7f592bd39f7ce5d607a394fc9",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/explanation.rs",
+      "sha256": "9ae6e75c242dd9132c5207d39af3cc2ccd227e30b5170f72711f9e580608b8fc",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/http.rs",
+      "sha256": "593a96c935d9d0d4f31fe829f90a5696b656b3a7bb24c1b14e381cf7209dd0c0",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/limits.rs",
+      "sha256": "22fcba81c8f0648912d30e331641c0e54567f99fce44bfea30b8ca110d297747",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/mod.rs",
+      "sha256": "21523b8b3d35ee132a65cabc14f2b544bd39a51ec6778e2333096ec250052a6f",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/openapi.rs",
+      "sha256": "b2dd459ad5426088e1e86e93a179a5e0ed31b49eaaef1e0053f4028c6366fbb2",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/privacy.rs",
+      "sha256": "dae02ce93dcd60f0aad53f2eecbd7af432e576b4f6d885ff3748c3ff28925988",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/sources.rs",
+      "sha256": "e587be0fbca94475518916bbbb1f2a8314670538a21130dc6af3c5bade1f2fe8",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/api/tests.rs",
+      "sha256": "5f96b1f6e69d727a5d4b3e3e58590d3d38af52e72b79ff0fb5e727b9cee49b20",
+      "origin": "current research working tree",
+      "reason": "Essential Rust regression tests/helpers; legacy compiled only with cfg(test)"
+    },
+    {
+      "path": "src/api/worker.rs",
+      "sha256": "00b20894b7c5bc570ec2c52dbac66ab97993595960e61af9fdc25531c9dd3206",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/bin/archer-api.rs",
+      "sha256": "a6bafd8f273bec39986154b15a8aeb5bca2a5a4afa94ee0c5631dca197dc6337",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "1254893dae71bfaa7df784df02c6e301138a0e6bb365034d44d2b82c8748f0de",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "src/main.rs",
+      "sha256": "2e194708555fc1ce6eca409c7fbf4e27c14f15c33af763c5c1ae6699aec8b40d",
+      "origin": "current research working tree",
+      "reason": "Production Rust analyzer/API/ARG/CLI source (including inline tests where present)"
+    },
+    {
+      "path": "tests/api_contract.rs",
+      "sha256": "30be82954115ea18baea126a855fa190be5b97809820a001d21cfa72cc68e513",
+      "origin": "current research working tree",
+      "reason": "Existing API integration or new dynamic graph/GitHub acceptance tests"
+    },
+    {
+      "path": "tests/verify_api_openapi.py",
+      "sha256": "d12a4429571a752e08177396e4adf7764d7a8d527ff2909be2d8210ba442b026",
+      "origin": "current research working tree",
+      "reason": "Existing API integration or new dynamic graph/GitHub acceptance tests"
+    },
+    {
+      "path": "tests/verify_dynamic_arg.py",
+      "sha256": "d1db1337b8103adf89c308e33c83e15968e2143a48c8afe87d4effe683713349",
+      "origin": "generated packaging/test/documentation file",
+      "reason": "Portable deployment configuration, frontend contract, fresh acceptance test or packaging audit metadata"
+    }
+  ],
+  "self_hash_note": "Self-referential packaging metadata intentionally has null hashes here. The external SHA256SUMS and verified ZIP checksum cover the complete archive."
+}

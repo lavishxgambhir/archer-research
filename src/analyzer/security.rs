@@ -441,6 +441,29 @@ fn request_token(expr: &Expr, request: &syn::Ident, tokens: &HashSet<String>) ->
     if token_alias(expr, tokens) {
         return true;
     }
+    // A required header is credential origin only. Both absence and invalid
+    // header text must propagate errors; defaults, unwraps and optional reads
+    // cannot enter the validated-value summary through this path.
+    if let Expr::Try(text) = expr {
+        if let Expr::MethodCall(convert) = &*text.expr {
+            if convert.method == "to_str" && convert.args.is_empty() {
+                if let Expr::Try(required) = &*convert.receiver {
+                    if let Expr::MethodCall(error) = &*required.expr {
+                        if error.method == "ok_or" && error.args.len() == 1 {
+                            if let Expr::MethodCall(get) = &*error.receiver {
+                                if let Expr::MethodCall(headers) = &*get.receiver {
+                                    return get.method == "get" && get.args.len() == 1
+                                        && matches!(&get.args[0], Expr::Lit(l) if matches!(&l.lit,syn::Lit::Str(_)))
+                                        && headers.method == "headers" && headers.args.is_empty()
+                                        && matches!(&*headers.receiver,Expr::Path(p) if p.path.is_ident(request));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let Expr::MethodCall(value) = expr else {
         return false;
     };
@@ -1058,7 +1081,7 @@ fn insertion_proof(index: &HandlerIndex, caller: &HandlerDefinition, identity: &
 }
 
 struct ConstructorVisitor {
-    calls: Vec<(usize, String, Vec<String>, Vec<String>)>,
+    calls: Vec<(usize, String, Vec<String>, Vec<String>, String)>,
 }
 impl<'ast> Visit<'ast> for ConstructorVisitor {
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
@@ -1094,18 +1117,217 @@ impl<'ast> Visit<'ast> for ConstructorVisitor {
                     segments[segments.len() - 2].clone(),
                     values,
                     segments,
+                    node.to_token_stream().to_string().replace(' ', ""),
                 ));
-            } else if segments.len() >= 2 && segments.last().is_some_and(|s| s == "admin") {
+            } else if segments.len() >= 2 && node.args.is_empty() {
                 self.calls.push((
                     node.span().start().line,
                     segments[segments.len() - 2].clone(),
-                    vec!["Admin".into()],
+                    Vec::new(),
                     segments,
+                    node.to_token_stream().to_string().replace(' ', ""),
                 ));
             }
         }
         visit::visit_expr_call(self, node);
     }
+}
+
+// This summary proves only required extension presence, never authenticated
+// identity. The producer and mount must be proved independently. Restrict the
+// consumer to a straight-line, propagated Result and the helper to the exact
+// standard Option success-preserving chain; method spelling alone is insufficient.
+fn required_extension(index: &HandlerIndex, helper: &HandlerDefinition) -> Option<String> {
+    if !helper.function.sig.generics.params.is_empty() {
+        return None;
+    }
+    let syn::ReturnType::Type(_, output) = &helper.function.sig.output else {
+        return None;
+    };
+    let context = (helper.crate_key.clone(), helper.module.clone());
+    if !result_type(index, &context, output, 0) {
+        return None;
+    }
+    let inputs = helper.function.sig.inputs.iter().collect::<Vec<_>>();
+    let [FnArg::Typed(arg)] = inputs.as_slice() else {
+        return None;
+    };
+    let Pat::Ident(binding) = &*arg.pat else {
+        return None;
+    };
+    let syn::Type::Reference(reference) = &*arg.ty else {
+        return None;
+    };
+    let syn::Type::Path(request) = &*reference.elem else {
+        return None;
+    };
+    if reference.mutability.is_some()
+        || external_path(index, &context, &request.path, 0).as_deref()
+            != Some("actix_web::HttpRequest")
+    {
+        return None;
+    }
+    let [Stmt::Expr(Expr::MethodCall(reject), None)] = helper.function.block.stmts.as_slice()
+    else {
+        return None;
+    };
+    if reject.method != "ok_or_else" || reject.args.len() != 1 {
+        return None;
+    }
+    let Expr::Closure(error) = &reject.args[0] else {
+        return None;
+    };
+    if !error.inputs.is_empty() || error.asyncness.is_some() {
+        return None;
+    }
+    let Expr::MethodCall(map) = &*reject.receiver else {
+        return None;
+    };
+    if map.method != "map" || map.args.len() != 1 {
+        return None;
+    }
+    let Expr::Closure(copy) = &map.args[0] else {
+        return None;
+    };
+    if copy.asyncness.is_some() || copy.inputs.len() != 1 {
+        return None;
+    }
+    let Pat::Ident(value) = &copy.inputs[0] else {
+        return None;
+    };
+    let Expr::MethodCall(clone) = &*copy.body else {
+        return None;
+    };
+    if !matches!(clone.method.to_string().as_str(), "clone" | "to_owned")
+        || !clone.args.is_empty()
+        || !matches!(&*clone.receiver, Expr::Path(p) if p.path.is_ident(&value.ident))
+    {
+        return None;
+    }
+    let Expr::MethodCall(get) = &*map.receiver else {
+        return None;
+    };
+    if get.method != "get" || !get.args.is_empty() {
+        return None;
+    }
+    let arguments = &get.turbofish.as_ref()?.args;
+    let arguments = arguments.iter().collect::<Vec<_>>();
+    let [syn::GenericArgument::Type(ty)] = arguments.as_slice() else {
+        return None;
+    };
+    let owner = policy_drift::record_type(index, helper, ty)?;
+    let Expr::MethodCall(extensions) = &*get.receiver else {
+        return None;
+    };
+    if extensions.method != "extensions"
+        || !extensions.args.is_empty()
+        || !matches!(&*extensions.receiver, Expr::Path(p) if p.path.is_ident(&binding.ident))
+    {
+        return None;
+    }
+    Some(format!("{}::{}", owner.0.display(), owner.1.join("::")))
+}
+
+fn required_extension_calls(index: &HandlerIndex, handler: &HandlerDefinition) -> Vec<Requirement> {
+    let mut requirements = Vec::new();
+    for stmt in &handler.function.block.stmts {
+        // A syntactic return (including one hidden in a macro) may bypass later
+        // gates. Unknown preceding Result types also prevent a dominance claim.
+        if code_may_exit(index, handler, std::slice::from_ref(stmt)) {
+            break;
+        }
+        let expression = match stmt {
+            Stmt::Local(local) => local
+                .init
+                .as_ref()
+                .filter(|i| i.diverge.is_none())
+                .map(|i| &*i.expr),
+            Stmt::Expr(expr, _) => Some(expr),
+            _ => None,
+        };
+        let Some(Expr::Try(consumed)) = expression else {
+            continue;
+        };
+        let Expr::Call(call) = &*consumed.expr else {
+            continue;
+        };
+        let Some(path) = call_path(&consumed.expr) else {
+            continue;
+        };
+        let target = HandlerTarget::Path {
+            segments: path.segments.iter().map(|s| s.ident.to_string()).collect(),
+            leading_colon: path.leading_colon.is_some(),
+        };
+        let (helper, resolution) =
+            index.resolve_handler(&handler.crate_key, &handler.module, &target);
+        if resolution == HandlerResolution::UniqueName {
+            continue;
+        }
+        let Some(helper) = helper else { continue };
+        let Some(identity) = required_extension(index, helper) else {
+            continue;
+        };
+        // The actual argument must be this handler's request, not a newly
+        // constructed request or another local value with an unknown origin.
+        let arguments = call.args.iter().collect::<Vec<_>>();
+        let [Expr::Reference(reference)] = arguments.as_slice() else {
+            continue;
+        };
+        let Expr::Path(actual) = &*reference.expr else {
+            continue;
+        };
+        let same_request = handler.function.sig.inputs.iter().any(|input| {
+            let FnArg::Typed(arg) = input else {
+                return false;
+            };
+            let Pat::Ident(binding) = &*arg.pat else {
+                return false;
+            };
+            let syn::Type::Path(ty) = &*arg.ty else {
+                return false;
+            };
+            actual.path.is_ident(&binding.ident)
+                && external_path(
+                    index,
+                    &(handler.crate_key.clone(), handler.module.clone()),
+                    &ty.path,
+                    0,
+                )
+                .as_deref()
+                    == Some("actix_web::HttpRequest")
+        });
+        // Shadowing/reassignment before this statement is deliberately not
+        // modeled; any occurrence as a binding or assignment is rejected.
+        struct Rebind<'a> {
+            name: &'a syn::Ident,
+            found: bool,
+        }
+        impl<'ast> Visit<'ast> for Rebind<'_> {
+            fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {
+                self.found |= p.ident == *self.name;
+                visit::visit_pat_ident(self, p);
+            }
+            fn visit_expr_assign(&mut self, a: &'ast syn::ExprAssign) {
+                self.found |= matches!(&*a.left, Expr::Path(p) if p.path.is_ident(self.name));
+                visit::visit_expr_assign(self, a);
+            }
+        }
+        let Some(name) = actual.path.get_ident() else {
+            continue;
+        };
+        let mut rebound = Rebind { name, found: false };
+        rebound.visit_block(&handler.function.block);
+        if !same_request || rebound.found {
+            continue;
+        }
+        requirements.push(Requirement {
+            dimension:"unresolved".into(), values:vec![identity], mechanism:"required_request_extension".into(),
+            enforcement:Enforcement::Unresolved, confidence:AuthStrength::Weak,
+            file:handler.file.clone(), line:call.span().start().line, symbol:path.to_token_stream().to_string(),
+            explanation:format!("Same-request extension lookup propagates an error on absence at {}:{} ({}); HTTP rejection, extension production and authenticated identity on this mount remain unverified", helper.file.display(),helper.function.sig.ident.span().start().line,helper.rust_path()),
+        });
+    }
+    requirements
 }
 
 pub(super) fn assess(
@@ -1128,6 +1350,7 @@ pub(super) fn assess(
         let mut uncertainty = Vec::new();
         let handler = index.route_handler(route);
         if let Some(handler) = handler {
+            requirements.extend(required_extension_calls(index, handler));
             // Resolve aliases before classifying helper names. Evidence retains
             // the spelling at the call site so control-flow checks still match.
             struct Calls(Vec<(String, usize)>);
@@ -1165,8 +1388,11 @@ pub(super) fn assess(
             }
         }
         for evidence in &mut route.authorization {
-            let constructor = constructors.get(&evidence.file).and_then(|calls| calls.iter().find(|(line, symbol, _, path)| *line == evidence.line && (symbol == &evidence.mechanism || evidence.symbol.as_ref().is_some_and(|s| s.replace(' ', "").contains(&path.join("::"))))));
-            if let Some((_, symbol, roles, path)) = constructor {
+            let constructor = constructors.get(&evidence.file).and_then(|calls| {
+                let matches:Vec<_>=calls.iter().filter(|(line,symbol,_,_,expression)| *line==evidence.line && evidence.symbol.as_ref().is_some_and(|s|s.replace(' ', "")==*expression || s==symbol)).collect();
+                if let Some(first)=matches.first() { if matches.iter().all(|m|m.4==first.4 && m.2==first.2 && m.3==first.3) {Some(*first)} else {None} } else {None}
+            });
+            if let Some((_, symbol, roles, path, _)) = constructor {
                 let location = index.file_modules.get(&evidence.file);
                 let resolved = location.and_then(|(key, module)| index.resolve_handler(key, module, &HandlerTarget::Path { segments: path.clone(), leading_colon: false }).0);
                 let canonical = resolved.and_then(|d| d.owner.as_ref().and_then(|k| k.1.last()).or_else(|| d.module.last())).map(String::as_str).unwrap_or(symbol);
@@ -1183,7 +1409,7 @@ pub(super) fn assess(
                         module_items(&ast.items, relative)
                     }).collect();
                 let roles = if canonical == "RoleGuard" {
-                    implementations.iter().flat_map(|items| constructor_roles(items)).collect::<Vec<_>>()
+                    resolved.map(|d|constructor_roles(index,d)).unwrap_or_default()
                 } else { roles.clone() };
                 let validated = implementations.iter().any(|items| middleware_has_role_gate(items, canonical));
                 if !roles.is_empty() && validated {
@@ -1225,6 +1451,7 @@ pub(super) fn assess(
             let mut values = Vec::new();
             let mut observed = false;
             let mut source_predicate=false;
+            let mut unconsumed_predicate=false;
             if let Some(handler) = handler {
                 let mut arguments = CallArguments { symbol: evidence.symbol.as_deref().unwrap_or(""), values: Vec::new() };
                 arguments.visit_block(&handler.function.block);
@@ -1239,6 +1466,12 @@ pub(super) fn assess(
                         if !observed && !helper_may_reject(index, helper, 0, &mut HashSet::new()) && evidence.is_authorization() {
                             evidence.kind = AuthEvidenceKind::Unknown;
                             uncertainty.push(format!("Local helper {symbol} has no supported rejection path; its name is not enforcement proof"));
+                        }
+                        if !observed && values.is_empty() && matches!(dimension,"roles"|"permissions") {
+                            if let Some(predicate) = field_gate_policy(index, helper) {
+                                values.push(predicate);
+                                unconsumed_predicate = true;
+                            }
                         }
                         if observed && values.is_empty() && matches!(dimension,"roles"|"permissions") {
                             let predicate=field_gate_policy(index,helper);
@@ -1262,7 +1495,7 @@ pub(super) fn assess(
                 enforcement: if observed { Enforcement::Observed } else if evidence.kind == AuthEvidenceKind::Unknown { Enforcement::Unresolved } else { Enforcement::Potential },
                 confidence: if observed { evidence.strength.clone() } else { AuthStrength::Weak }, file: evidence.file.clone(), line: evidence.line,
                 symbol: evidence.symbol.clone().unwrap_or_default(),
-                explanation: if source_predicate {"Unconditional consumed helper requires this source-resolved boolean field predicate on every successful return; this does not establish identity provenance or authentication".into()} else if observed { "Local predicate controls a rejection branch, or a local fallible helper propagates rejection".into() } else { "Lexical evidence; acceptance/rejection control flow has not been proven".into() },
+                explanation: if unconsumed_predicate {"Resolved helper requires this source predicate, but its rejection result is not proven to control the handler; this is unresolved enforcement, not a verified missing-check finding".into()} else if source_predicate {"Unconditional consumed helper requires this source-resolved boolean field predicate on every successful return; this does not establish identity provenance or authentication".into()} else if observed { "Local predicate controls a rejection branch, or a local fallible helper propagates rejection".into() } else { "Lexical evidence; acceptance/rejection control flow has not been proven".into() },
             });
         }
         if requirements.iter().any(|r| r.enforcement == Enforcement::Potential) {
@@ -1315,35 +1548,26 @@ fn module_items<'a>(items: &'a [Item], path: &[String]) -> Option<&'a [Item]> {
     })
 }
 
-fn constructor_roles(items: &[Item]) -> Vec<String> {
-    struct Values(Vec<String>);
-    impl<'ast> Visit<'ast> for Values {
-        fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
-            for field in &node.fields {
-                if matches!(&field.member, syn::Member::Named(name) if name == "role") {
-                    if let Expr::Path(value) = &field.expr {
-                        self.0
-                            .push(value.path.to_token_stream().to_string().replace(' ', ""));
-                    }
-                }
-            }
-        }
+// Summarize the called constructor, never another constructor's policy.
+// Only a direct immutable value is supported; richer factories remain unknown.
+fn constructor_roles(index: &HandlerIndex, definition: &HandlerDefinition) -> Vec<String> {
+    if !definition.function.sig.inputs.is_empty() || !definition.function.sig.generics.params.is_empty() || definition.function.sig.asyncness.is_some() || matches!(definition.function.sig.safety, syn::Safety::Unsafe(_)) || definition.function.block.stmts.len() != 1 {
+        return Vec::new();
     }
-    let mut values = Values(Vec::new());
-    for item in items {
-        if let Item::Impl(item) = item {
-            if matches!(&*item.self_ty, syn::Type::Path(ty) if ty.path.is_ident("RoleGuard")) {
-                for method in &item.items {
-                    if let syn::ImplItem::Fn(method) = method {
-                        if method.sig.ident == "admin" {
-                            values.visit_block(&method.block);
-                        }
-                    }
-                }
-            }
-        }
+    let Some(Stmt::Expr(Expr::Struct(value), None)) = definition.function.block.stmts.last() else { return Vec::new(); };
+    let Some(owner) = definition.owner.as_ref().and_then(|o| o.1.last()) else {return Vec::new();};
+    if value.rest.is_some() || !(value.path.is_ident("Self") || value.path.is_ident(owner)) {
+        return Vec::new();
     }
-    values.0
+    let fields: Vec<_> = value.fields.iter().filter(|f|matches!(&f.member,syn::Member::Named(n) if n=="role")).collect();
+    let [field] = fields.as_slice() else { return Vec::new(); };
+    let Expr::Path(policy) = &field.expr else { return Vec::new(); };
+    if policy.path.segments.len() < 2 || policy.qself.is_some() { return Vec::new(); }
+    let Some((syn::Type::Path(declared),_)) = definition.owner.as_ref().and_then(|owner|index.record_fields.get(owner)).and_then(|fields|fields.get("role")) else {return Vec::new();};
+    let mut prefix=policy.path.clone();prefix.segments.pop();prefix.segments.pop_punct();
+    // Uncanonicalized type aliases must not become differing role policies.
+    if declared.qself.is_some() || prefix.to_token_stream().to_string()!=declared.path.to_token_stream().to_string() {return Vec::new();}
+    vec![policy.path.to_token_stream().to_string().replace(' ', "")]
 }
 
 #[derive(Default)]
@@ -1875,4 +2099,426 @@ fn helper_may_reject(
         let (helper, _) = index.resolve_handler(&definition.crate_key, &definition.module, &target);
         helper.is_some_and(|helper| helper_may_reject(index, helper, depth + 1, visited))
     })
+}
+
+
+/// Baseline comparison metadata only. No authorization meaning is assigned to
+/// these local rejection branches, and peer inference never consumes them.
+#[derive(Debug)]
+pub struct LocalRejection {
+    pub route: RouteReference,
+    pub condition: String,
+}
+pub(super) fn local_rejections(routes: &[Route], index: &HandlerIndex) -> Vec<LocalRejection> {
+    struct Branches<'a> {
+        index: &'a HandlerIndex,
+        handler: &'a HandlerDefinition,
+        context: Vec<String>,
+        found: Vec<String>,
+    }
+    impl Branches<'_> {
+        fn rejects(&self, expr: &Expr) -> bool {
+            if let Expr::Block(block) = expr {
+                return matches!(block.block.stmts.as_slice(),[Stmt::Expr(e,_) ] if self.rejects(e));
+            }
+            let Expr::Return(ret) = expr else {return false;};
+            let Some(Expr::Call(call)) = ret.expr.as_deref() else {return false;};
+            let Expr::Path(path)=&*call.func else {return false;};
+            let context=(self.handler.crate_key.clone(),self.handler.module.clone());
+            if !matches!(external_path(self.index,&context,&path.path,0).as_deref(),Some("Err"|"std::result::Result::Err"|"core::result::Result::Err")) || call.args.len()!=1 {return false;}
+            // An argument with a nonlocal success exit cannot prove rejection.
+            !code_may_exit(self.index,self.handler,&[Stmt::Expr(call.args[0].clone(),None)])
+        }
+        fn record(&mut self, condition:String) {
+            let mut path=self.context.clone();path.push(condition);
+            self.found.push(path.join(" && "));
+        }
+    }
+    impl<'ast> Visit<'ast> for Branches<'_> {
+        fn visit_expr_if(&mut self, node:&'ast ExprIf) {
+            let condition=node.cond.to_token_stream().to_string();
+            let yes=Expr::Block(syn::ExprBlock{attrs:vec![],label:None,block:node.then_branch.clone()});
+            if self.rejects(&yes) {self.record(format!("({condition})"));}
+            if let Some((_,other))=&node.else_branch {
+                if self.rejects(other) {self.record(format!("!({condition})"));}
+            }
+            self.context.push(format!("({condition})"));self.visit_block(&node.then_branch);self.context.pop();
+            if let Some((_,other))=&node.else_branch {
+                self.context.push(format!("!({condition})"));self.visit_expr(other);self.context.pop();
+            }
+        }
+        fn visit_expr_closure(&mut self,_:&'ast ExprClosure) {}
+        fn visit_expr_async(&mut self,_:&'ast syn::ExprAsync) {}
+        fn visit_item_fn(&mut self,_:&'ast ItemFn) {}
+    }
+    let mut result=Vec::new();
+    for route in routes {
+        let Some(handler)=index.route_handler(route) else {continue;};
+        let syn::ReturnType::Type(_,ty)=&handler.function.sig.output else {continue;};
+        if !result_type(index,&(handler.crate_key.clone(),handler.module.clone()),ty,0) {continue;}
+        let mut branches=Branches{index,handler,context:vec![],found:vec![]};branches.visit_block(&handler.function.block);
+        branches.found.sort();branches.found.dedup();
+        for condition in branches.found {result.push(LocalRejection{route:RouteReference::from(route),condition});}
+    }
+    result
+}
+
+
+/// Informational source contrasts, never inputs to security classification or drift.
+#[derive(Debug, Serialize)]
+pub struct CheckContrast {
+    pub classification: String,
+    pub target: RouteReference,
+    pub target_handler_file: PathBuf,
+    pub target_handler_line: usize,
+    pub target_requirements: Vec<Requirement>,
+    pub target_checks: Vec<Requirement>,
+    pub not_verified_reason: String,
+    pub related_routes: Vec<RouteReference>,
+    pub observed_difference: String,
+    pub relationship_evidence: Vec<String>,
+    pub supporting_checks: Vec<Requirement>,
+    pub unresolved_evidence: Vec<String>,
+    pub confidence: String,
+    pub investigation: Vec<String>,
+}
+
+type ReviewSummaryKey = (ModuleKey, PathBuf, usize, usize);
+
+pub(super) fn check_contrasts(
+    routes: &[Route],
+    edges: &[policy_drift::Relationship],
+    assessments: &[Assessment],
+    index: &HandlerIndex,
+) -> Vec<CheckContrast> {
+    let handlers: Vec<_> = routes.iter().map(|route| index.route_handler(route)).collect();
+    let mut cache: HashMap<ReviewSummaryKey, Option<String>> = HashMap::new();
+    let mut future_cache = HashMap::new();
+    let checks: Vec<Vec<Requirement>> = handlers.iter().map(|handler| {
+        let Some(handler)=*handler else{return Vec::new();};
+        let mut found=review_future_checks(index,handler,&mut future_cache);
+        for stmt in &handler.function.block.stmts {
+            let expression=match stmt {Stmt::Local(l) if l.init.as_ref().is_some_and(|i|i.diverge.is_none())=>l.init.as_ref().map(|i|&*i.expr),Stmt::Expr(e,_)=>Some(e),_=>None};
+            let (root,mechanism)=match expression {
+                Some(Expr::Try(t)) => (consumed_expression(&t.expr),"source_consumed_helper"),
+                Some(Expr::MethodCall(m)) if m.method=="ok" && m.args.is_empty() => (consumed_expression(&m.receiver),"source_optional_helper"),
+                _=>continue,
+            };
+            let Expr::Call(call)=root else{continue;};
+            let Expr::Path(path)=&*call.func else{continue;};
+            let target=HandlerTarget::Path{segments:path.path.segments.iter().map(|s|s.ident.to_string()).collect(),leading_colon:path.path.leading_colon.is_some()};
+            let (Some(helper),resolution)=index.resolve_handler(&handler.crate_key,&handler.module,&target) else{continue;};
+            if resolution==HandlerResolution::UniqueName {continue;}
+            let key=((helper.crate_key.clone(),helper.module.clone()),helper.file.clone(),helper.function.sig.ident.span().start().line,helper.function.sig.ident.span().start().column);
+            let Some(identity)=cache.entry(key).or_insert_with(||required_extension(index,helper)).clone() else{continue;};
+            let [Expr::Reference(reference)]=call.args.iter().collect::<Vec<_>>().as_slice() else{continue;};
+            let Expr::Path(actual)=&*reference.expr else{continue;};
+            let Some(name)=actual.path.get_ident() else{continue;};
+            let same_request=handler.function.sig.inputs.iter().any(|a|matches!(a,FnArg::Typed(a) if matches!(&*a.pat,Pat::Ident(p) if p.ident==*name) && matches!(&*a.ty,syn::Type::Path(p) if external_path(index,&(handler.crate_key.clone(),handler.module.clone()),&p.path,0).as_deref()==Some("actix_web::HttpRequest"))));
+            #[derive(Default)] struct Rebound{names:HashSet<String>}
+            impl<'ast> Visit<'ast> for Rebound {
+                fn visit_pat_ident(&mut self,p:&'ast syn::PatIdent){self.names.insert(p.ident.to_string());visit::visit_pat_ident(self,p);}
+                fn visit_expr_assign(&mut self,a:&'ast syn::ExprAssign){if let Expr::Path(p)=&*a.left{if let Some(n)=p.path.get_ident(){self.names.insert(n.to_string());}}visit::visit_expr_assign(self,a);}
+            }
+            let mut rebound=Rebound::default();rebound.visit_block(&handler.function.block);
+            if !same_request || rebound.names.contains(&name.to_string()){continue;}
+            found.push(Requirement{dimension:"request_extension".into(),values:vec![identity],mechanism:mechanism.into(),enforcement:Enforcement::Unresolved,confidence:AuthStrength::Weak,file:handler.file.clone(),line:call.span().start().line,symbol:helper.rust_path(),explanation:format!("Call-site form {mechanism}; helper {}:{} performs a success-preserving request-extension lookup with an error on absence. Reachability, authenticated production and whole-route rejection remain unverified.",helper.file.display(),helper.function.sig.ident.span().start().line)});
+        }
+        found
+    }).collect();
+    let mut results = Vec::new();
+    for (target, route) in routes.iter().enumerate() {
+        if handlers[target].is_none()
+            || is_authentication_route(route)
+            || is_operational_public_route(route)
+        {
+            continue;
+        }
+        let mut support: std::collections::BTreeMap<
+            String,
+            Vec<(usize, &Requirement, &policy_drift::Relationship)>,
+        > = std::collections::BTreeMap::new();
+        for edge in edges {
+            if !matches!(
+                edge.kind.as_str(),
+                "same_resource" | "collection_item" | "shared_database_resource"
+            ) || edge
+                .conflicts
+                .iter()
+                .any(|c| c == "known database resources differ")
+            {
+                continue;
+            }
+            let other = if edge.left == target {
+                edge.right
+            } else if edge.right == target {
+                edge.left
+            } else {
+                continue;
+            };
+            if route.application != routes[other].application
+                || is_authentication_route(&routes[other])
+            {
+                continue;
+            }
+            for check in checks[other].iter().filter(|c|c.mechanism=="source_consumed_helper") {
+                if checks[target]
+                    .iter()
+                    .any(|c| matches!(c.mechanism.as_str(),"source_consumed_helper"|"source_unclassified_future_helper") && c.symbol == check.symbol && c.values == check.values)
+                {
+                    continue;
+                }
+                let key = format!("{}:{:?}", check.symbol, check.values);
+                support.entry(key).or_default().push((other, check, edge));
+            }
+        }
+        for members in support.values_mut() {
+            members.sort_by_key(|(i, _, _)| *i);
+            let mut unique = HashSet::new();
+            members.retain(|(i, _, _)| {
+                let h=handlers[*i].unwrap();
+                unique.insert((h.file.clone(),h.function.sig.ident.span().start().line,h.function.sig.ident.span().start().column))
+            });
+
+            if members.len() < 2 {
+                continue;
+            }
+            let assessment = assessments
+                .iter()
+                .find(|a| policy_drift::same_route(&a.route, &RouteReference::from(route)));
+            let mut unresolved = assessment
+                .map(|a| a.uncertainty.clone())
+                .unwrap_or_default();
+            unresolved.extend(
+                route
+                    .authorization
+                    .iter()
+                    .filter(|e| e.kind == AuthEvidenceKind::Unknown)
+                    .map(|e| {
+                        format!(
+                            "Unresolved enforcement {}:{}: {}",
+                            e.file.display(),
+                            e.line,
+                            e.symbol.as_deref().unwrap_or("unknown")
+                        )
+                    }),
+            );
+            unresolved.push("Candidate path/resource structure does not prove common policy; read/write boundaries and alternative checks can intentionally differ. No absence of enforcement, identity or ownership conclusion is drawn.".into());
+            results.push(CheckContrast{classification:"InformationalCheckContrast".into(),target:RouteReference::from(route),
+                target_handler_file:handlers[target].unwrap().file.clone(),
+                target_handler_line:handlers[target].unwrap().function.sig.ident.span().start().line,
+                target_requirements:assessment.map(|a|a.requirements.clone()).unwrap_or_default(),
+                target_checks:checks[target].clone(),
+                not_verified_reason:"This is a local syntax contrast, not an allegation of inconsistent or missing authorization. Public reads, method-specific policies and alternative mechanisms may explain it.".into(),
+                related_routes:members.iter().map(|(i,_,_)|RouteReference::from(&routes[*i])).collect(),observed_difference:format!("{} related handlers contain a consumed call to {}; this target has no matching supported error-propagating call form",members.len(),members[0].1.symbol),relationship_evidence:members.iter().flat_map(|(_,_,e)|e.evidence.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect(),supporting_checks:members.iter().map(|(_,c,_)|(*c).clone()).collect(),unresolved_evidence:unresolved,confidence:"Source-observed syntax difference; security significance undetermined".into(),investigation:vec!["Confirm and document whether this method intentionally allows callers without the compared extension check.".into(),"Inspect middleware, alternate helper paths and database predicates before considering an enforcement change.".into()]});
+        }
+    }
+    results
+}
+
+
+fn review_request_parameter(index: &HandlerIndex, handler: &HandlerDefinition, name: &syn::Ident) -> bool {
+    fn binding(index: &HandlerIndex, handler: &HandlerDefinition, pat: &Pat, ty: &syn::Type, name: &syn::Ident, depth: usize) -> bool {
+        if depth >= 8 { return false; }
+        match (pat, ty) {
+            (Pat::Ident(p), syn::Type::Path(t)) => p.ident == *name && review_external_path(index, &(handler.crate_key.clone(),handler.module.clone()), &t.path, 0).as_deref()==Some("actix_web::HttpRequest"),
+            (Pat::Tuple(p), syn::Type::Tuple(t)) if p.elems.len()==t.elems.len() => p.elems.iter().zip(&t.elems).any(|(p,t)|binding(index,handler,p,t,name,depth+1)),
+            _ => false,
+        }
+    }
+    handler.function.sig.inputs.iter().any(|a|matches!(a,FnArg::Typed(a) if binding(index,handler,&a.pat,&a.ty,name,0)))
+}
+
+fn review_rebound(handler: &HandlerDefinition, name: &syn::Ident) -> bool {
+    struct Rebind<'a> { name: &'a syn::Ident, found: bool }
+    impl<'ast> Visit<'ast> for Rebind<'_> {
+        fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {self.found |= p.ident==*self.name;visit::visit_pat_ident(self,p);}
+        fn visit_item_const(&mut self, i: &'ast syn::ItemConst) {self.found |= i.ident==*self.name;}
+        fn visit_item_static(&mut self, i: &'ast syn::ItemStatic) {self.found |= i.ident==*self.name;}
+        fn visit_expr_assign(&mut self, a: &'ast syn::ExprAssign) {self.found |= matches!(&*a.left,Expr::Path(p) if p.path.is_ident(self.name));visit::visit_expr_assign(self,a);}
+    }
+    let mut rebind=Rebind{name,found:false};rebind.visit_block(&handler.function.block);rebind.found
+}
+
+fn review_future_type(index:&HandlerIndex, helper:&HandlerDefinition)->bool {
+    if !helper.function.sig.generics.params.is_empty(){return false;}
+    let syn::ReturnType::Type(_,ty)=&helper.function.sig.output else{return false;};
+    let syn::Type::ImplTrait(ty)=&**ty else{return false;};
+    ty.bounds.iter().any(|b| {
+        let syn::TypeParamBound::Trait(bound)=b else{return false;};
+        if review_external_path(index,&(helper.crate_key.clone(),helper.module.clone()),&bound.path,0).as_deref()!=Some("futures::Future"){return false;}
+        let Some(last)=bound.path.segments.last() else{return false;};
+        let syn::PathArguments::AngleBracketed(args)=&last.arguments else{return false;};
+        ["Item","Error"].iter().all(|name|args.args.iter().any(|a|matches!(a,syn::GenericArgument::AssocType(t) if t.ident==*name)))
+    })
+}
+
+// A source contract for the *syntax* of a request-header Result lifted into a
+// futures 0.1 pipeline. It proves neither token validation nor future execution.
+fn review_header_future(index:&HandlerIndex, helper:&HandlerDefinition)->Option<(usize,String)> {
+    if !review_future_type(index,helper) {return None;}
+    let Stmt::Expr(expr,None)=helper.function.block.stmts.last()? else{return None;};
+    let mut expr=expr;
+    let mut depth=0;
+    while let Expr::MethodCall(call)=expr {
+        if depth>=16 || !["and_then","flatten","from_err","map","map_err"].contains(&call.method.to_string().as_str()){return None;}
+        expr=&call.receiver;depth+=1;
+    }
+    let Expr::Call(lift)=expr else{return None;};
+    let Expr::Path(path)=&*lift.func else{return None;};
+    let context=(helper.crate_key.clone(),helper.module.clone());
+    if review_rebound(helper,&path.path.segments.first()?.ident){return None;}
+    if review_external_path(index,&context,&path.path,0).as_deref()!=Some("futures::future::result") {return None;}
+    let [Expr::Call(preprocess)]=lift.args.iter().collect::<Vec<_>>().as_slice() else{return None;};
+    let Expr::Path(preprocessor)=&*preprocess.func else{return None;};
+    if review_rebound(helper,&preprocessor.path.segments.first()?.ident){return None;}
+    let target=HandlerTarget::Path{segments:preprocessor.path.segments.iter().map(|s|s.ident.to_string()).collect(),leading_colon:preprocessor.path.leading_colon.is_some()};
+    let (Some(definition),resolution)=index.resolve_handler(&helper.crate_key,&helper.module,&target) else{return None;};
+    if resolution==HandlerResolution::UniqueName || !definition.function.sig.generics.params.is_empty() {return None;}
+    let syn::ReturnType::Type(_,ty)=&definition.function.sig.output else{return None;};
+    if !review_result_type(index,&(definition.crate_key.clone(),definition.module.clone()),ty,0) || !helper_may_reject(index,definition,0,&mut HashSet::new()) {return None;}
+    let [Expr::MethodCall(get)]=preprocess.args.iter().collect::<Vec<_>>().as_slice() else{return None;};
+    if get.method!="get" || get.args.len()!=1 {return None;}
+    let Expr::Path(header)=&get.args[0] else{return None;};
+    if review_rebound(helper,&header.path.segments.first()?.ident){return None;}
+    let header=review_external_path(index,&context,&header.path,0)?;
+    if !["actix_web::http::header::AUTHORIZATION","http::header::AUTHORIZATION"].contains(&header.as_str()){return None;}
+    let Expr::MethodCall(headers)=&*get.receiver else{return None;};
+    if headers.method!="headers" || !headers.args.is_empty(){return None;}
+    let Expr::Path(request)=&*headers.receiver else{return None;};
+    let name=request.path.get_ident()?;
+    if review_rebound(helper,name){return None;}
+    for (position,input) in helper.function.sig.inputs.iter().enumerate() {
+        let FnArg::Typed(arg)=input else{continue;};
+        if !matches!(&*arg.pat,Pat::Ident(p) if p.ident==*name){continue;}
+        let syn::Type::Reference(reference)=&*arg.ty else{continue;};
+        let syn::Type::Path(ty)=&*reference.elem else{continue;};
+        if reference.mutability.is_some() || review_external_path(index,&context,&ty.path,0).as_deref()!=Some("actix_web::HttpRequest"){continue;}
+        return Some((position,format!("request header {header}; preprocessing source {}:{}",definition.file.display(),definition.function.sig.ident.span().start().line)));
+    }
+    None
+}
+
+fn review_future_checks(index:&HandlerIndex, handler:&HandlerDefinition, cache:&mut HashMap<ReviewSummaryKey,Option<(usize,String)>>)->Vec<Requirement> {
+    if !review_future_type(index,handler){return Vec::new();}
+    let Some(Stmt::Expr(tail,None))=handler.function.block.stmts.last() else{return Vec::new();};
+    let mut stack=vec![(tail,"source_consumed_helper",0)];let mut found=Vec::new();let mut steps=0;
+    while let Some((expr,mode,depth))=stack.pop() {
+        steps+=1;if steps>64 || depth>=16 {break;}
+        match expr {
+            Expr::MethodCall(m) => {
+                let method=m.method.to_string();
+                if !["and_then","then","or_else","from_err","map","map_err","flatten"].contains(&method.as_str()) {
+                    stack.push((&m.receiver,"source_unclassified_future_helper",depth+1));continue;
+                }
+                let receiver_mode=if mode=="source_unclassified_future_helper" {mode}
+                    else if method=="then" {
+                        if m.args.first().is_some_and(review_optional_result_closure) {"source_optional_future_helper"}else{"source_unclassified_future_helper"}
+                    } else if method=="or_else" {"source_unclassified_future_helper"}else{mode};
+                stack.push((&m.receiver,receiver_mode,depth+1));
+                if method=="and_then" {
+                    if let Some(Expr::Closure(c))=m.args.first(){
+                        match &*c.body {
+                            Expr::Block(b) if b.block.stmts.len()==1 => {if let Stmt::Expr(e,None)=&b.block.stmts[0]{stack.push((e,mode,depth+1));}},
+                            e=>stack.push((e,mode,depth+1)),
+                        }
+                    }
+                }
+            }
+            Expr::Paren(p)=>stack.push((&p.expr,mode,depth+1)),
+            Expr::Call(call)=>{
+                let Expr::Path(path)=&*call.func else{continue;};
+                let target=HandlerTarget::Path{segments:path.path.segments.iter().map(|s|s.ident.to_string()).collect(),leading_colon:path.path.leading_colon.is_some()};
+                let (Some(helper),resolution)=index.resolve_handler(&handler.crate_key,&handler.module,&target) else{continue;};
+                if resolution==HandlerResolution::UniqueName {continue;}
+                let span=helper.function.sig.ident.span().start();
+                let Some((position,identity))=cache.entry(((helper.crate_key.clone(),helper.module.clone()),helper.file.clone(),span.line,span.column)).or_insert_with(||review_header_future(index,helper)).clone() else{continue;};
+                let Some(Expr::Reference(reference))=call.args.iter().nth(position) else{continue;};
+                let Expr::Path(actual)=&*reference.expr else{continue;};let Some(name)=actual.path.get_ident() else{continue;};
+                if !review_request_parameter(index,handler,name) || review_rebound(handler,name){continue;}
+                found.push(Requirement{dimension:"request_header_pipeline".into(),values:vec![identity],mechanism:mode.into(),enforcement:Enforcement::Unresolved,confidence:AuthStrength::Weak,file:handler.file.clone(),line:call.span().start().line,symbol:helper.rust_path(),explanation:format!("Returned future-chain call-site form {mode}; resolved helper {}:{} lifts a local Result-returning Authorization-header preprocessor. This records source syntax, not future execution, validated identity, mandatory authentication or whole-route error propagation.",helper.file.display(),span.line)});
+            }
+            _=>{},
+        }
+    }
+    found
+}
+
+
+// Informational summaries may inspect a closed source glob; verified API
+// modeling retains external_path's stricter abstention unchanged.
+fn review_external_path(index:&HandlerIndex,context:&ModuleKey,path:&syn::Path,depth:usize)->Option<String> {
+    if let Some(path)=external_path(index,context,path,0){return Some(path);}
+    if depth>=8{return None;}
+    let names:Vec<_>=path.segments.iter().map(|s|s.ident.to_string()).collect();let first=names.first()?;
+    if let Some(imports)=index.scope(&context.0,&context.1).and_then(|s|s.imports.get(first)) {
+        let [import]=imports.as_slice() else{return None;};let mut expanded=import.segments.clone();expanded.extend_from_slice(&names[1..]);
+        if expanded==names{return None;}
+        return review_external_path(index,context,&syn::parse_str(&expanded.join("::")).ok()?,depth+1);
+    }
+    if !["futures","actix_web","http","std","core"].contains(&first.as_str()) || index.dependencies.contains_key(&(context.0.clone(),first.clone())){return None;}
+    let target=UsePath{segments:vec![first.clone()],leading_colon:path.leading_colon.is_some()};
+    if index.resolve_module(&context.0,&context.1,&target,0).is_some(){return None;}
+    fn closed(index:&HandlerIndex,context:&ModuleKey,name:&str,depth:usize,active:&mut HashSet<ModuleKey>)->bool {
+        if depth>=8 || !active.insert(context.clone()){return false;}
+        let mut alias=context.clone();alias.1.push(name.to_string());
+        if index.type_aliases.contains_key(&alias){return false;}
+        let Some(scope)=index.scope(&context.0,&context.1) else{return index.is_module(&context.0,&context.1);};
+        if scope.public_imports.contains(name){return false;}
+        for glob in &scope.public_globs {
+            let Some(key)=index.resolve_module(&context.0,&context.1,glob,0) else{return false;};
+            if !closed(index,&key,name,depth+1,active){return false;}
+        }
+        active.remove(context);true
+    }
+    for glob in &index.scope(&context.0,&context.1)?.globs {
+        let key=index.resolve_module(&context.0,&context.1,glob,0)?;
+        if !closed(index,&key,first,0,&mut HashSet::new()){return None;}
+    }
+    Some(names.join("::"))
+}
+
+
+fn review_result_type(index:&HandlerIndex,context:&ModuleKey,ty:&syn::Type,depth:usize)->bool {
+    if depth>=8{return false;}
+    if result_type(index,context,ty,0){return true;}
+    let syn::Type::Path(path)=ty else{return false;};
+    if matches!(review_external_path(index,context,&path.path,0).as_deref(),Some("Result"|"std::result::Result"|"core::result::Result")){return true;}
+    let segments:Vec<_>=path.path.segments.iter().map(|s|s.ident.to_string()).collect();
+    let mut aliases=Vec::new();
+    if let Some(key)=index.resolve_module(&context.0,&context.1,&UsePath{segments:segments.clone(),leading_colon:path.path.leading_colon.is_some()},0){if index.type_aliases.contains_key(&key){aliases.push(key);}}
+    if aliases.is_empty() && segments.len()==1 {
+        let Some(scope)=index.scope(&context.0,&context.1) else{return false;};
+        for glob in &scope.globs {
+            let Some(mut key)=index.resolve_module(&context.0,&context.1,glob,0) else{return false;};
+            let export=index.scope(&key.0,&key.1);
+            if export.is_some_and(|s|!s.public_globs.is_empty()){return false;}
+            key.1.push(segments[0].clone());
+            if index.record_types.contains(&key) || index.traits.contains_key(&key) || export.is_some_and(|s|s.public_imports.contains(&segments[0])){return false;}
+            if index.type_aliases.get(&key).is_some_and(|a|matches!(a.vis,syn::Visibility::Public(_))){aliases.push(key);}
+        }
+    }
+    aliases.sort();aliases.dedup();let [key]=aliases.as_slice() else{return false;};
+    let alias=&index.type_aliases[key];
+    if matches!(&*alias.ty,syn::Type::Path(p) if p.path.segments.first().is_some_and(|s|alias.generics.type_params().any(|t|t.ident==s.ident))){return false;}
+    review_result_type(index,&(key.0.clone(),key.1[..key.1.len()-1].to_vec()),&alias.ty,depth+1)
+}
+
+
+fn review_optional_result_closure(expr:&Expr)->bool {
+    let Expr::Closure(closure)=expr else{return false;};
+    let [Pat::Ident(binding)]=closure.inputs.iter().collect::<Vec<_>>().as_slice() else{return false;};
+    struct Use<'a>{name:&'a syn::Ident,optional:bool,shadowed:bool}
+    impl<'ast> Visit<'ast> for Use<'_> {
+        fn visit_expr_method_call(&mut self,m:&'ast ExprMethodCall){
+            self.optional |= m.method=="ok" && m.args.is_empty() && matches!(&*m.receiver,Expr::Path(p) if p.path.is_ident(self.name));
+            visit::visit_expr_method_call(self,m);
+        }
+        fn visit_pat_ident(&mut self,p:&'ast syn::PatIdent){self.shadowed |= p.ident==*self.name;}
+        fn visit_expr_closure(&mut self,_:&'ast ExprClosure){}
+        fn visit_expr_async(&mut self,_:&'ast syn::ExprAsync){}
+        fn visit_item_fn(&mut self,_:&'ast ItemFn){}
+    }
+    let mut usage=Use{name:&binding.ident,optional:false,shadowed:false};usage.visit_expr(&closure.body);
+    usage.optional && !usage.shadowed
 }

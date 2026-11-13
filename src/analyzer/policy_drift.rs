@@ -2451,54 +2451,36 @@ pub(super) fn infer(
         }
 
         for target in &members {
-            // Unknown behavior is not evidence of a missing requirement.
-            if matches!(target.route.status, RouteSecurityStatus::Unknown { .. })
-                || target
-                    .requirements
-                    .iter()
-                    .any(|r| r.enforcement == Enforcement::Unresolved)
-                || target
-                    .route
-                    .authorization
-                    .iter()
-                    .any(|e| e.kind == AuthEvidenceKind::Unknown)
-            {
-                let unknown_syms: Vec<String> = target
-                    .route
-                    .authorization
-                    .iter()
-                    .filter(|e| e.kind == AuthEvidenceKind::Unknown)
-                    .filter_map(|e| e.symbol.clone())
-                    .collect();
-                for dimension in DIMENSIONS {
-                    let reason = if unknown_syms.is_empty() {
-                        "Target enforcement is unresolved or contains unknown security behavior"
-                            .to_string()
-                    } else {
-                        format!(
-                            "Target enforcement is unresolved for {dimension}; unresolved symbols (names do not prove behavior): {}",
-                            unknown_syms.join(", ")
-                        )
-                    };
-                    explanations.push(StageEvidence::drift(
-                        group,
-                        target,
-                        dimension,
-                        &reason,
-                        vec![],
-                    ));
-                }
-                continue;
-            }
             for dimension in DIMENSIONS {
                 let others = policy_population(&members, target, dimension);
                 let policies = policy_support(&others, dimension);
                 // Require two supporting peers and a strict majority of all
                 // other members, including unknown/unsupported members.
-                let Some((expected, supporters)) = policies
+                let supported = policies
                     .iter()
-                    .find(|(_, peers)| sufficient_support(peers.len(), others.len()))
-                else {
+                    .find(|(_, peers)| sufficient_support(peers.len(), others.len()));
+                let actual = policy(target, dimension);
+                let satisfied = supported.is_some_and(|(expected, _)| {
+                    actual.as_ref().is_some_and(|values| {
+                        if dimension == "roles" {
+                            values.iter().all(|v| expected.contains(v))
+                        } else {
+                            values == expected
+                        }
+                    })
+                });
+                let blockers = comparison_uncertainty(target, dimension, satisfied);
+                if !blockers.is_empty() {
+                    explanations.push(StageEvidence::drift(
+                        group,
+                        target,
+                        dimension,
+                        "Requirement comparison is unresolved; names do not prove behavior",
+                        blockers,
+                    ));
+                    continue;
+                }
+                let Some((expected, supporters)) = supported else {
                     explanations.push(StageEvidence::drift(
                         group,
                         target,
@@ -2508,7 +2490,6 @@ pub(super) fn infer(
                     ));
                     continue;
                 };
-                let actual = policy(target, dimension);
                 if actual.is_none()
                     && expected.iter().any(|v| v.starts_with("source predicate "))
                     && target.requirements.iter().any(|r| {
@@ -2638,4 +2619,108 @@ pub(super) fn infer(
             }
         }
     }
+}
+
+// A typed, unresolved authorization check can hide a compensating policy, so
+// it still blocks absence/mismatch claims in other authorization dimensions.
+// It cannot erase an independently observed, satisfied prerequisite. Unknown
+// identity provenance remains a dependency of all authorization dimensions.
+fn comparison_uncertainty(target: &Assessment, dimension: &str, satisfied: bool) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if let RouteSecurityStatus::Unknown { reason } = &target.route.status {
+        // Only this status is derived entirely from the evidence examined below.
+        // Unresolved handlers and mount contexts remain route-wide blockers.
+        if reason != "Route contains unrecognized authorization evidence" {
+            blockers.push(reason.clone());
+        }
+    }
+    for evidence in &target.route.authorization {
+        if evidence.kind == AuthEvidenceKind::Unknown
+            && !target.requirements.iter().any(|r| {
+                r.enforcement == Enforcement::Unresolved
+                    && r.file == evidence.file
+                    && r.line == evidence.line
+                    && Some(r.symbol.as_str()) == evidence.symbol.as_deref()
+                    && matches!(
+                        r.dimension.as_str(),
+                        "authentication" | "roles" | "permissions" | "ownership"
+                    )
+            })
+        {
+            blockers.push(format!(
+                "Unclassified evidence: {}",
+                evidence.symbol.as_deref().unwrap_or("unknown")
+            ));
+        }
+    }
+    for requirement in &target.requirements {
+        if requirement.enforcement == Enforcement::Unresolved {
+            let source = requirement.dimension.as_str();
+            if source == dimension
+                || source == "authentication"
+                || !matches!(source, "roles" | "permissions" | "ownership")
+                || !satisfied
+            {
+                blockers.push(format!(
+                    "Unresolved {source}: {} ({})",
+                    requirement.symbol, requirement.explanation
+                ));
+            }
+        }
+    }
+    blockers
+}
+
+
+/// Source differences requiring review, never inputs to verified inference.
+#[derive(Debug, Serialize)]
+pub struct ReviewObservation {
+    pub classification: String,
+    pub target: RouteReference,
+    pub related_routes: Vec<RouteReference>,
+    pub dimension: String,
+    pub observed_difference: String,
+    pub relationship_evidence: String,
+    pub supporting_requirements: Vec<security::Requirement>,
+    pub target_requirements: Vec<security::Requirement>,
+    pub unresolved_evidence: Vec<String>,
+    pub not_verified_reason: String,
+    pub verification_steps: Vec<String>,
+}
+
+pub(super) fn reviews(groups: &[PeerGroup], assessments: &[Assessment], findings: &[Finding]) -> Vec<ReviewObservation> {
+    let mut result = Vec::new();
+    let mut emitted = HashSet::new();
+    for group in groups {
+        // Resource evidence is independent of the security observations below.
+        if !group.description.contains("shared resolved resource:") { continue; }
+        let members = members(group, assessments);
+        for target in &members {
+            if !matches!(target.route.method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE") { continue; }
+            if findings.iter().any(|f| same_route(&f.suspicious_route, &target.route)) { continue; }
+            for dimension in ["roles", "permissions"] {
+                let population = policy_population(&members, target, dimension);
+                let population: Vec<_> = population.into_iter().filter(|p| matches!(p.route.method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE")).collect();
+                let support = policy_support(&population, dimension);
+                let Some((expected, supporters)) = support.iter().find(|(values, peers)| values.len()==1 && values[0].starts_with("source predicate ") && sufficient_support(peers.len(), population.len())) else { continue; };
+                if policy(target, dimension).is_some() { continue; }
+                // A recognized alternative policy is not evidence of a missing check.
+                if target.requirements.iter().any(|r| r.enforcement == Enforcement::Observed && matches!(r.dimension.as_str(), "roles" | "permissions" | "ownership")) { continue; }
+                let blockers = comparison_uncertainty(target, dimension, false);
+                if blockers.is_empty() { continue; }
+                if !emitted.insert((comparison_key(&target.route),dimension.to_string(),expected.clone())) { continue; }
+                let supporting_requirements = supporters.iter().flat_map(|a| a.requirements.iter().filter(|r|r.dimension==dimension && r.enforcement==Enforcement::Observed).cloned()).collect();
+                result.push(ReviewObservation {
+                    classification: "ExploratoryReview".into(), target: target.route.clone(),
+                    related_routes: supporters.iter().map(|p|p.route.clone()).collect(), dimension: dimension.into(),
+                    observed_difference: format!("Two or more comparable write handlers enforce {}; this target has no proven consumed equivalent handler check", expected.join(", ")),
+                    relationship_evidence: group.description.clone(), supporting_requirements,
+                    target_requirements: target.requirements.clone(), unresolved_evidence: blockers,
+                    not_verified_reason: "Unresolved identity, middleware or handler behavior may provide equivalent or operation-specific enforcement. This observation does not establish missing authorization.".into(),
+                    verification_steps: vec!["Confirm that these write operations intentionally require the same predicate.".into(), "Trace mounted middleware and identity production for this method and path.".into(), "Inspect helper result consumption and database predicates for equivalent enforcement before changing code.".into()],
+                });
+            }
+        }
+    }
+    result
 }

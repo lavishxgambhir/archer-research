@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 
-mod analyzer;
+use archer::analyzer;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -112,6 +112,17 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    if !report.check_comparisons.is_empty() {
+        println!("Informational handler-check contrasts: {}", report.check_comparisons.len());
+        for contrast in &report.check_comparisons {
+            println!("  {} {} ({}:{}): {}", contrast.target.method, contrast.target.path, contrast.target.file.display(), contrast.target.line, contrast.observed_difference);
+            println!("    {}", contrast.confidence);
+        }
+    }
+    for observation in &report.review_observations {
+        println!("Exploratory review (not verified drift): {} {}: {}", observation.target.method, observation.target.path, observation.observed_difference);
+        println!("  {}", observation.not_verified_reason);
+    }
     if let Some(target_path) = &cli.explain {
         println!("============================================================");
         println!("ARCHER Route Authorization Explainability: {}", target_path);

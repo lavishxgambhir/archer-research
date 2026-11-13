@@ -1850,3 +1850,410 @@ fn app(c:&mut Config) {{c.service(handler);}}
             .any(|d| d.code == "unsupported_attribute"));
     }
 }
+
+#[test]
+fn typed_uncertainty_preserves_independently_satisfied_comparisons() {
+    let checks = [
+        ("authentication", "require_auth(\"session\")?;"),
+        ("roles", "check_role(\"Admin\")?;"),
+        ("permissions", "check_permission(\"manage\")?;"),
+        (
+            "ownership",
+            "if !is_owner(user, id) { return Err(denied()); }",
+        ),
+    ];
+    // Source fixtures, including unresolved helpers which are converted to
+    // Unknown evidence by assessment, exercise the complete reporting pipeline.
+    for (dimension, check) in checks {
+        let unknown = if dimension == "roles" {
+            "check_permission_unknown();"
+        } else {
+            "check_role_unknown();"
+        };
+        let target = format!("{check} {unknown}");
+        let mut source = format!(
+            r#"
+fn require_auth(kind: &str) -> Result<(), Error> {{ if allowed(kind) {{ Ok(()) }} else {{ Err(denied()) }} }}
+fn check_role(role: &str) -> Result<(), Error> {{ if !allowed(role) {{ return Err(denied()); }} Ok(()) }}
+fn check_permission(p: &str) -> Result<(), Error> {{ if !allowed(p) {{ return Err(denied()); }} Ok(()) }}
+fn is_owner(user: User, id: Id) -> bool {{ user.id == id }}
+async fn one() {{ {check} sqlx::query("SELECT * FROM records"); }}
+async fn two() {{ {check} sqlx::query("SELECT * FROM records"); }}
+async fn three() {{ {target} sqlx::query("SELECT * FROM records"); }}
+fn app(c: &mut Config) {{ c.route("/one/{{id}}",web::get().to(one)).route("/two/{{id}}",web::get().to(two)).route("/three/{{id}}",web::get().to(three)); }}
+"#
+        );
+        // Use canonical recognized helper names with no rejection path.
+        source = source
+            .replace("check_permission_unknown", "require_permission")
+            .replace("check_role_unknown", "require_role");
+        let report = TempRepo::new("dimension-isolation", &[("main.rs", &source)]).analyze();
+        assert!(
+            report.analysis_evidence.iter().any(|e| e.stage == "drift"
+                && e.route.as_ref().and_then(|r| r.handler.as_deref()) == Some("three")
+                && e.dimension.as_deref() == Some(dimension)
+                && e.abstention_reasons.is_empty()),
+            "{dimension}: {:?}",
+            report.analysis_evidence
+        );
+        assert!(report.finding_details.is_empty());
+        let target = report
+            .security_assessments
+            .iter()
+            .find(|a| a.route.handler.as_deref() == Some("three"))
+            .unwrap();
+        assert!(
+            target
+                .requirements
+                .iter()
+                .any(|r| r.enforcement == security::Enforcement::Unresolved)
+        );
+    }
+}
+
+#[test]
+fn uncertainty_blocks_missing_mismatched_and_same_dimension_policies() {
+    for body in [
+        "require_permission();",
+        "check_role(\"User\")?; require_permission();",
+        "check_role(\"Admin\")?; require_role();",
+    ] {
+        let report = analyze_bodies(
+            "dependent-uncertainty",
+            ["check_role(\"Admin\")?;", "check_role(\"Admin\")?;", body],
+        );
+        assert!(report.finding_details.is_empty(), "{body}");
+        assert!(
+            !report.analysis_evidence.iter().any(|e| e.stage == "drift"
+                && e.route.as_ref().and_then(|r| r.handler.as_deref()) == Some("three")
+                && e.dimension.as_deref() == Some("roles")
+                && e.abstention_reasons.is_empty()),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn dependent_uncertainty_and_provenance_fail_closed() {
+    let report = analyze_bodies(
+        "uncertainty-provenance",
+        [
+            "check_role(\"Admin\")?;",
+            "check_role(\"Admin\")?;",
+            "check_role(\"Admin\")?; require_permission();",
+        ],
+    );
+    for variant in [
+        "identity",
+        "unclassified",
+        "wrong-file",
+        "wrong-line",
+        "wrong-symbol",
+        "mount",
+        "handler",
+        "one-supporter",
+    ] {
+        let mut assessments = report.security_assessments.clone();
+        let target = assessments
+            .iter_mut()
+            .find(|a| a.route.handler.as_deref() == Some("three"))
+            .unwrap();
+        let unresolved = target
+            .requirements
+            .iter_mut()
+            .find(|r| r.enforcement == security::Enforcement::Unresolved)
+            .unwrap();
+        match variant {
+            "identity" => unresolved.dimension = "authentication".into(),
+            "unclassified" => unresolved.dimension = "unresolved".into(),
+            "wrong-file" => unresolved.file = PathBuf::from("other.rs"),
+            "wrong-line" => unresolved.line += 1,
+            "wrong-symbol" => unresolved.symbol = "different".into(),
+            "mount" => {
+                target.route.status = RouteSecurityStatus::Unknown {
+                    reason:
+                        "Attribute service has no verified application/middleware mount context"
+                            .into(),
+                }
+            }
+            "handler" => {
+                target.route.status = RouteSecurityStatus::Unknown {
+                    reason: "Handler symbol could not be uniquely resolved in repository AST"
+                        .into(),
+                }
+            }
+            "one-supporter" => {}
+            _ => unreachable!(),
+        }
+        if variant == "one-supporter" {
+            assessments
+                .iter_mut()
+                .find(|a| a.route.handler.as_deref() == Some("one"))
+                .unwrap()
+                .requirements
+                .clear();
+        }
+        let mut evidence = Vec::new();
+        let mut findings = Vec::new();
+        policy_drift::infer(
+            &report.peer_groups,
+            &assessments,
+            &mut findings,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut HashSet::new(),
+            &mut evidence,
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.suspicious_route.handler.as_deref() == Some("three")),
+            "{variant}"
+        );
+        assert!(
+            !evidence.iter().any(|e| e.stage == "drift"
+                && e.route.as_ref().and_then(|r| r.handler.as_deref()) == Some("three")
+                && e.dimension.as_deref() == Some("roles")
+                && e.abstention_reasons.is_empty()),
+            "{variant}"
+        );
+    }
+}
+
+
+#[test]
+fn resolved_ignored_predicate_is_retained_without_claiming_enforcement() {
+    for check in ["require_role(&user);", "let ignored = require_role(&user);", "require_role(&user)?;"] {
+        let source = format!(r#"
+struct User {{ privileged: bool }}
+fn require_role(user: &User) -> Result<(), Error> {{
+    if !user.privileged {{ Err(denied()) }} else {{ Ok(()) }}
+}}
+async fn one(user: User) {{ {check} sqlx::query("SELECT * FROM records"); }}
+fn app(c: &mut Config) {{ c.route("/records",web::get().to(one)); }}
+"#);
+        let report = TempRepo::new("ignored-predicate-provenance", &[("main.rs", &source)]).analyze();
+        let requirement = report.security_assessments[0].requirements.iter().find(|r| r.dimension == "roles").unwrap();
+        assert!(requirement.values.iter().any(|v| v.contains("User.privileged == true")));
+        assert_eq!(requirement.enforcement, if check.contains('?') { security::Enforcement::Observed } else { security::Enforcement::Unresolved });
+        assert!(report.finding_details.is_empty());
+    }
+}
+
+
+#[test]
+fn alternative_enforcement_does_not_turn_ignored_predicate_into_verified_drift() {
+    for alternative in [
+        "if !user.privileged { return Err(denied()); }",
+        "alternate(&user)?;",
+        "let permitted = records.filter(privileged.eq(true)).first(conn)?;",
+    ] {
+        let source = format!(r#"
+struct User {{ privileged: bool }}
+fn require_role(user: &User) -> Result<(), Error> {{ if !user.privileged {{ Err(denied()) }} else {{ Ok(()) }} }}
+fn alternate(user: &User) -> Result<(), Error> {{ if !user.privileged {{ Err(denied()) }} else {{ Ok(()) }} }}
+async fn one(user: User) {{ require_role(&user)?; sqlx::query("SELECT * FROM records"); }}
+async fn two(user: User) {{ require_role(&user)?; sqlx::query("SELECT * FROM records"); }}
+async fn three(user: User) {{ require_role(&user); {alternative} sqlx::query("SELECT * FROM records"); }}
+async fn public() {{ sqlx::query("SELECT * FROM catalog"); }}
+fn app(c: &mut Config) {{ c.service(web::scope("/records").wrap(PolicyMiddleware::new()).route("/one",web::get().to(one)).route("/two",web::get().to(two)).route("/three",web::get().to(three))); c.route("/catalog",web::get().to(public)); }}
+"#);
+        let report = TempRepo::new("alternative-enforcement", &[("main.rs", &source)]).analyze();
+        assert!(report.finding_details.is_empty());
+        assert!(!report.peer_groups.iter().any(|g| g.routes.iter().any(|r|r.handler.as_deref()==Some("public")) && g.routes.iter().any(|r|r.handler.as_deref()==Some("three"))));
+    }
+}
+
+
+#[test]
+fn exploratory_reviews_are_separate_and_preserve_alternative_policies() {
+    for variant in ["missing", "ignored", "alternative", "public"] {
+        let alternative = variant == "alternative" || variant == "public";
+        let body = match variant { "alternative" => "check_permission(\"other\")?;", "ignored" => "require_role(&u);", _ => "" };
+        let method = if variant == "public" { "get" } else { "post" };
+        let source = format!(r#"
+struct User {{ allowed: bool }}
+fn require_role(u:&User)->Result<(),Error>{{if !u.allowed{{Err(denied())}}else{{Ok(())}}}}
+fn check_permission(p:&str)->Result<(),Error>{{if allowed(p){{Ok(())}}else{{Err(denied())}}}}
+async fn one(u:User){{require_role(&u)?;sqlx::query("SELECT * FROM records");}}
+async fn two(u:User){{require_role(&u)?;sqlx::query("SELECT * FROM records");}}
+async fn three(u:User){{{body}sqlx::query("SELECT * FROM records");}}
+fn app(c:&mut Config){{c.service(web::scope("/records").wrap(UnknownPolicy::new()).route("/one",web::post().to(one)).route("/two",web::post().to(two)).route("/three",web::{method}().to(three)));}}
+"#);
+        let report=TempRepo::new("review-tier", &[("main.rs", &source)]).analyze();
+        assert!(report.finding_details.is_empty());
+        assert_eq!(report.review_observations.len(),usize::from(!alternative));
+        if !alternative {
+            let review=&report.review_observations[0];
+            assert_eq!(review.related_routes.len(),2);
+            assert!(!review.unresolved_evidence.is_empty());
+            assert_eq!(review.supporting_requirements.len(),2);
+        }
+    }
+}
+
+
+#[test]
+fn resource_provenance_abstains_for_ambiguous_and_utility_dependencies() {
+    for setup in [
+        "trait Store { fn rows(&self); } async fn one(store:Box<dyn Store>){store.rows();} async fn two(store:Box<dyn Store>){store.rows();}",
+        "type First=Second; type Second=First; async fn one(store:First){store.rows();} async fn two(store:Second){store.rows();}",
+        "mod a {pub struct Repo;} mod b {pub struct Repo;} use a::*; use b::*; async fn one(){Repo::rows();} async fn two(){Repo::rows();}",
+        "fn utility()->usize{sqlx::query(\"SELECT * FROM settings\");1} async fn one(){let v=utility();} async fn two(){let v=utility();}",
+        "mod a {pub struct Repo; impl Repo {pub fn rows()->usize{sqlx::query(\"SELECT * FROM records\");1}}} mod b {pub struct Repo; impl Repo {pub fn rows()->usize{sqlx::query(\"SELECT * FROM invoices\");1}}} async fn one(){let v=a::Repo::rows();} async fn two(){let v=b::Repo::rows();}",
+    ] {
+        let source=format!("{setup} fn app(c:&mut Config){{c.route(\"/alpha\",web::get().to(one)).route(\"/beta\",web::get().to(two));}}");
+        let report=TempRepo::new("provenance-abstention", &[("main.rs",&source)]).analyze();
+        assert!(report.peer_groups.is_empty(), "{setup}");
+        assert!(report.finding_details.is_empty());
+        assert!(report.review_observations.is_empty());
+    }
+}
+
+
+#[test]
+fn promotion_requires_resource_proof_beyond_namespace_or_collection_shape() {
+    for source in [r#"
+async fn public_registration() {} async fn manage_users() {} async fn articles() {}
+fn app(c:&mut Config){c.route("/api/users",web::post().to(public_registration)).route("/api/manage",web::post().to(manage_users)).route("/api/articles",web::post().to(articles));}
+"#, r#"
+async fn collection() {} async fn item() {}
+fn app(c:&mut Config){c.route("/objects",web::post().to(collection)).route("/objects/{id}",web::get().to(item));}
+"#, r#"
+async fn collection(){sqlx::query("SELECT * FROM records");} async fn item(){sqlx::query("SELECT * FROM invoices");}
+fn app(c:&mut Config){c.route("/objects",web::get().to(collection)).route("/objects/{id}",web::get().to(item));}
+"#] {
+        let report=TempRepo::new("promotion-evidence-boundary", &[("main.rs",source)]).analyze();
+        assert!(!report.candidate_relationships.is_empty());
+        assert!(report.peer_groups.is_empty());
+        assert!(report.finding_details.is_empty());
+        assert!(report.review_observations.is_empty());
+        assert_eq!(report.summary.as_ref().unwrap().peer_compared_routes,0);
+    }
+}
+
+
+#[test]
+fn metadata_tables_and_documentation_do_not_invent_macro_routes() {
+    let source=r#"
+use actix_web::{web,App};
+#[metadata::catalog(routes("/invented" => [get(handler),post(handler)]))]
+struct Catalog;
+#[metadata::catalog(routes(DYNAMIC => get(handler)))]
+struct Dynamic;
+#[metadata::catalog(routes("/dead" => get(handler)))]
+struct Dead;
+/// #[routes(routes("/documented" => get(handler)))]
+async fn handler(){}
+fn app(){App::new().configure(Catalog::configure);}
+"#;
+    let report=TempRepo::new("macro-metadata-boundary", &[("main.rs",source)]).analyze();
+    assert!(report.routes.is_empty());
+    assert!(report.finding_details.is_empty());
+    assert!(report.review_observations.is_empty());
+    assert!(report.diagnostics.iter().any(|d|d.code=="unresolved_callback"));
+}
+
+
+#[test]
+fn source_check_contrasts_are_informational_and_require_independent_related_handlers() {
+    for variant in [
+        "contrast",
+        "same-check",
+        "optional",
+        "unrelated",
+        "lookalike",
+        "alias-handler",
+        "shadowed",
+    ] {
+        let helper = if variant == "lookalike" {
+            "struct HttpRequest;"
+        } else {
+            "use actix_web::HttpRequest;"
+        };
+        let first = if variant == "shadowed" {
+            "let req=another();let user=lookup(&req)?;"
+        } else {
+            "let user=lookup(&req)?;"
+        };
+        let third = if variant == "optional" { "let user=lookup(&req).ok();" } else if variant == "same-check" {
+            "let user=lookup(&req)?;"
+        } else {
+            ""
+        };
+        let route = if variant == "unrelated" {
+            "/invoices"
+        } else {
+            "/records/{id}"
+        };
+        let second = if variant == "alias-handler" {
+            "one"
+        } else {
+            "two"
+        };
+        let source = format!(
+            r#"
+{helper}
+struct Principal {{id:u64}}
+fn lookup(req:&HttpRequest)->Result<Principal,Error>{{req.extensions().get::<Principal>().map(|u|u.clone()).ok_or_else(||denied())}}
+async fn one(req:HttpRequest)->Result<(),Error>{{{first} Ok(())}}
+async fn two(req:HttpRequest)->Result<(),Error>{{let user=lookup(&req)?;Ok(())}}
+async fn three(req:HttpRequest)->Result<(),Error>{{{third} Ok(())}}
+fn app(c:&mut Config){{c.route("/records/{{id}}",web::post().to(one)).route("/records/{{id}}",web::put().to({second})).route("{route}",web::get().to(three));}}
+"#
+        );
+        let report = TempRepo::new("source-check-contrast", &[("main.rs", &source)]).analyze();
+        assert_eq!(
+            report.check_comparisons.len(),
+            usize::from(matches!(variant,"contrast"|"optional")),
+            "{variant}"
+        );
+        assert!(report.finding_details.is_empty());
+        assert!(report.review_observations.is_empty());
+        if matches!(variant,"contrast"|"optional") {
+            let contrast = &report.check_comparisons[0];
+            assert_eq!(contrast.classification, "InformationalCheckContrast");
+            assert_eq!(contrast.supporting_checks.len(), 2);
+            assert!(
+                contrast
+                    .supporting_checks
+                    .iter()
+                    .all(|c| c.enforcement == security::Enforcement::Unresolved)
+            );
+            assert!(contrast.confidence.contains("undetermined"));
+        }
+    }
+}
+
+
+#[test]
+fn future_source_contrasts_resolve_closed_aliases_and_abstain_on_ambiguity() {
+    for variant in ["closed","open-glob","ambiguous-alias","cyclic-alias","lookalike-future","recovered-error","unrelated","shadowed-header","preserved-result","wrong-optional-value"] {
+        let prelude=if variant=="cyclic-alias" {"pub type Outcome<T>=Other<T>;pub type Other<T>=Outcome<T>;"} else {"pub type Outcome<T>=std::result::Result<T,Error>;"};
+        let extra=match variant {"open-glob"=>"use external_unknown::*;", "ambiguous-alias"=>"mod other{pub type Outcome<T>=std::result::Result<T,Error>;}use other::*;",_=>""};
+        let future=if variant=="lookalike-future" {"use futures::future::result;trait Future {}"} else {"use futures::{future::result,Future};"};
+        let first=if variant=="recovered-error" {"gate(&state,&req).or_else(|e|Ok(())).and_then(|a|finish(a))"} else {"gate(&state,&req).and_then(|a|finish(a))"};
+        let route=if variant=="unrelated" {"/api/invoices"}else{"/api/records/{id}"};
+        let third=match variant {"preserved-result"=>"gate(&state,&req).then(|a|a)","wrong-optional-value"=>"gate(&state,&req).then(|a|{let other=something();other.ok();a})",_=>"gate(&state,&req).then(|a|finish(a.ok()))"};
+        let shadow=if variant=="shadowed-header" {"const AUTHORIZATION:Header=other();"}else{""};
+        let source=format!(r#"
+mod prelude{{{prelude}}}
+mod handlers {{
+use actix_web::{{HttpRequest,http::header::AUTHORIZATION}};
+{future}
+use crate::prelude::*;{extra}
+fn preprocess(h:Option<&Header>)->Outcome<String>{{if bad(){{return Err(denied());}}Ok(text())}}
+fn gate(state:&State,req:&HttpRequest)->impl Future<Item=Principal,Error=Error>{{{shadow}result(preprocess(req.headers().get(AUTHORIZATION))).and_then(|token|validate(token))}}
+pub fn one(state:State,(req,): (HttpRequest,))->impl Future<Item=Response,Error=Error>{{{first}}}
+pub fn two(state:State,(req,): (HttpRequest,))->impl Future<Item=Response,Error=Error>{{result(validate_input()).and_then(move |_|gate(&state,&req)).and_then(|a|finish(a))}}
+pub fn three(state:State,(req,): (HttpRequest,))->impl Future<Item=Response,Error=Error>{{{third}}}
+}}
+use actix_web::web;
+fn app(c:&mut Config){{c.route("/api/records/{{id}}",web::post().to(handlers::one)).route("/api/records/{{id}}",web::put().to(handlers::two)).route("{route}",web::get().to(handlers::three));}}
+"#);
+        let report=TempRepo::new("future-check-contrast", &[("main.rs",&source)]).analyze();
+        assert_eq!(report.check_comparisons.len(),usize::from(variant=="closed"),"{variant}");
+        assert!(report.finding_details.is_empty());assert!(report.review_observations.is_empty());
+        if variant=="closed" {assert_eq!(report.check_comparisons[0].target_checks[0].mechanism,"source_optional_future_helper");}
+    }
+}
